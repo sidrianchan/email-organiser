@@ -1,0 +1,18 @@
+# Copy this file to accounts.toml and fill in your addresses.
+# accounts.toml is git-ignored, so your addresses never reach GitHub.
+# Passwords do NOT go here. They live in the macOS Keychain (see store_password.py).
+
+[[account]]
+name = "yahoo"
+host = "imap.mail.yahoo.com"
+username = "you@yahoo.com.hk"
+
+[[account]]
+name = "icloud"
+host = "imap.mail.me.com"
+username = "you@icloud.com"
+
+[[account]]
+name = "gmail"
+host = "imap.gmail.com"
+username = "you@gmail.com"
