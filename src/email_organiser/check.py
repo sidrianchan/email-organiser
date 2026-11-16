@@ -5,36 +5,18 @@ Run:  python3 -m uv run python -m email_organiser.check
 Read-only. It counts unread mail; it cannot change, move, or send anything.
 """
 import subprocess
-import tomllib
 
-import keyring
-from imapclient import IMAPClient
 from imapclient.exceptions import LoginError
 
-SERVICE = "email-organiser"  # same Keychain label store_password.py used
-
-
-def load_accounts() -> list[dict]:
-    # accounts.toml holds names, servers and addresses. No passwords.
-    with open("accounts.toml", "rb") as f:
-        return tomllib.load(f)["account"]
+from .mail import connect, load_accounts
 
 
 def count_unread(account: dict) -> int:
-    # 1. Get the app password from Keychain. Google shows its passwords with
-    #    spaces ("abcd efgh ...") only for readability, so remove them.
-    password = keyring.get_password(SERVICE, account["name"]).replace(" ", "")
-
-    # 2. Connect over an encrypted connection (IMAP over SSL, port 993).
-    #    "with" makes sure we log out even if something fails.
-    with IMAPClient(account["host"], ssl=True) as client:
-        client.login(account["username"], password)
-
-        # 3. readonly=True: the server itself refuses any change in this session,
-        #    not even marking mail as read. Our first safety layer.
+    with connect(account) as client:
+        # readonly=True: the server refuses any change in this session,
+        # not even marking mail as read.
         client.select_folder("INBOX", readonly=True)
-
-        # 4. Ask the server for messages without the "Seen" flag.
+        # Ask the server for messages without the "Seen" flag.
         return len(client.search(["UNSEEN"]))
 
 
