@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS messages (
 """
 
 
+# Milestone 3: digested = emails already shown in a summary, so none appears twice.
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -40,6 +41,11 @@ CREATE TABLE IF NOT EXISTS claude_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     label TEXT NOT NULL, needs_reply INTEGER, reason TEXT, model TEXT,
     labelled_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS digested (
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    digest_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (account, uidvalidity, uid)
 );
 CREATE TABLE IF NOT EXISTS my_labels (

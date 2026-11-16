@@ -80,13 +80,8 @@ def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
     return answers, model
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--redo", action="store_true", help="relabel everything")
-    db = store.open_db()
-    if parser.parse_args().redo:
-        db.execute("DELETE FROM claude_labels")  # only Claude's labels; yours are untouched
-        db.commit()
+def classify_pending(db) -> int:
+    """Label every email Claude hasn't labelled yet. Returns how many were labelled."""
     # Every email we've seen that Claude hasn't labelled yet.
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.snippet
@@ -124,6 +119,17 @@ def main() -> None:
         print(f"  batch {start // BATCH_SIZE + 1}: labelled {done} so far ({model})")
 
     print(f"Done: {done} labelled, {len(rows) - done} left for next run")
+    return done
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--redo", action="store_true", help="relabel everything")
+    db = store.open_db()
+    if parser.parse_args().redo:
+        db.execute("DELETE FROM claude_labels")  # only Claude's labels; yours are untouched
+        db.commit()
+    classify_pending(db)
 
 
 if __name__ == "__main__":

@@ -80,12 +80,13 @@ def body_text(msg) -> str:
     return re.sub(r"\s+", " ", text).strip()                       # tidy whitespace
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--hours", type=int, default=HOURS, help="how far back to look")
-    hours = parser.parse_args().hours
+# Our own summaries carry this header, so we never fetch and label them as mail.
+OWN_HEADER = "X-Email-Organiser"
 
-    db = store.open_db()
+
+def fetch_new(db, hours: int, show: bool = True) -> int:
+    """Fetch the last `hours` from every account and save the new ones. Returns how many were new."""
+    total_new = 0
     for account in load_accounts():
         with connect(account) as client:
             folder = client.select_folder("INBOX", readonly=True)
@@ -94,12 +95,24 @@ def main() -> None:
 
         new = 0
         for uid, raw in sorted(emails.items()):
+            headers = raw.split(b"\r\n\r\n", 1)[0]  # the header block ends at the first blank line
+            if OWN_HEADER.encode() in headers:      # one of our own summaries: skip it
+                continue
             info = parse_message(raw)
             if store.save_if_new(db, account["name"], uidvalidity, uid, info):
                 new += 1
-                print(f"  [{account['name']}] {info['sender'][:35]:<35} | {info['subject'][:60]}")
+                if show:
+                    print(f"  [{account['name']}] {info['sender'][:35]:<35} | {info['subject'][:60]}")
         print(f"{account['name']}: {len(emails)} in the last {hours}h, {new} new")
+        total_new += new
     db.commit()  # save everything to disk in one go
+    return total_new
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hours", type=int, default=HOURS, help="how far back to look")
+    fetch_new(store.open_db(), parser.parse_args().hours)
 
 
 if __name__ == "__main__":
