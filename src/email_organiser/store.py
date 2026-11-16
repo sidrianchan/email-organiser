@@ -31,11 +31,44 @@ CREATE TABLE IF NOT EXISTS messages (
 """
 
 
+# Milestone 2. Two label tables, kept apart on purpose:
+#   claude_labels = what Claude thinks
+#   my_labels     = what YOU say (the "ground truth" we measure Claude against)
+# Keeping them separate means Claude's answer can never overwrite yours.
+LABEL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS claude_labels (
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    label TEXT NOT NULL, needs_reply INTEGER, reason TEXT, model TEXT,
+    labelled_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS my_labels (
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    label TEXT NOT NULL,
+    needs_reply INTEGER,
+    labelled_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+"""
+
+
 def open_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(exist_ok=True)
     db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row  # lets us read columns by name: row["subject"]
     db.execute(SCHEMA)
+    db.executescript(LABEL_SCHEMA)
+    _add_column_if_missing(db, "claude_labels", "needs_reply", "INTEGER")
+    _add_column_if_missing(db, "my_labels", "needs_reply", "INTEGER")
     return db
+
+
+def _add_column_if_missing(db: sqlite3.Connection, table: str, column: str, kind: str) -> None:
+    """Upgrade an existing database in place ("migration") instead of starting over.
+    needs_reply: 1 = yes, 0 = no, NULL = not answered yet."""
+    existing = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+    if column not in existing:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 def save_if_new(db: sqlite3.Connection, account: str, uidvalidity: int,

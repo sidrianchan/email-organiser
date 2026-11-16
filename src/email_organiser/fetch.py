@@ -3,7 +3,11 @@ and remember what we've already seen.
 
 Run:  python3 -m uv run python -m email_organiser.fetch
 Run it twice: the second run should say 0 new.
+
+To collect a bigger pile for the milestone 2 test set, look back further:
+      python3 -m uv run python -m email_organiser.fetch --hours 168   (7 days)
 """
+import argparse
 import email
 import html
 import re
@@ -77,12 +81,16 @@ def body_text(msg) -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hours", type=int, default=HOURS, help="how far back to look")
+    hours = parser.parse_args().hours
+
     db = store.open_db()
     for account in load_accounts():
         with connect(account) as client:
             folder = client.select_folder("INBOX", readonly=True)
             uidvalidity = folder[b"UIDVALIDITY"]
-            emails = fetch_recent(client, HOURS)
+            emails = fetch_recent(client, hours)
 
         new = 0
         for uid, raw in sorted(emails.items()):
@@ -90,7 +98,7 @@ def main() -> None:
             if store.save_if_new(db, account["name"], uidvalidity, uid, info):
                 new += 1
                 print(f"  [{account['name']}] {info['sender'][:35]:<35} | {info['subject'][:60]}")
-        print(f"{account['name']}: {len(emails)} in the last {HOURS}h, {new} new")
+        print(f"{account['name']}: {len(emails)} in the last {hours}h, {new} new")
     db.commit()  # save everything to disk in one go
 
 
