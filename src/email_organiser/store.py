@@ -1,12 +1,12 @@
 """Remembers which emails we've already seen, in a small SQLite database.
 
-SQLite = a whole database in one file (data/mail.db). No server to install.
-data/ is git-ignored, so your mail never reaches GitHub.
+SQLite = a whole database in one file (~/.email-organiser/mail.db, see paths.py).
+No server to install, and it lives outside the code folder, so it never reaches GitHub.
 """
 import sqlite3
-from pathlib import Path
+from . import paths
 
-DB_PATH = Path("data/mail.db")
+DB_PATH = paths.DB
 
 # One row per email we've seen.
 # PRIMARY KEY (account, uidvalidity, uid) = "this combination can only exist once".
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS my_labels (
 
 
 def open_db() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row  # lets us read columns by name: row["subject"]
     db.execute(SCHEMA)

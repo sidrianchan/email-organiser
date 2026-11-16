@@ -1,5 +1,5 @@
-# Copy this file to accounts.toml and fill in your addresses.
-# accounts.toml is git-ignored, so your addresses never reach GitHub.
+# Copy this file to ~/.email-organiser/accounts.toml and fill in your addresses.
+# That folder is outside the code, so your addresses never reach GitHub.
 # Passwords do NOT go here. They live in the macOS Keychain (see store_password.py).
 
 [[account]]

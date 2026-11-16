@@ -1,7 +1,7 @@
 [project]
 name = "email-organiser"
 version = "0.1.0"
-description = "Add your description here"
+description = "Personal AI email organiser: reads three IMAP mailboxes, labels mail with Claude, and puts a twice-daily summary in your inbox. It never sends or deletes mail."
 requires-python = ">=3.12"
 dependencies = [
     "imapclient>=4.2.0",
@@ -14,3 +14,8 @@ email-organiser = "email_organiser:main"
 [build-system]
 requires = ["uv_build>=0.13.8,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

@@ -16,12 +16,11 @@ mailbox. It is NOT sent. There is still no sending code anywhere (design rule 2)
 import argparse
 import html
 import subprocess
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr, parsedate_to_datetime
 
-from . import store
+from . import paths, store
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
 from .mail import connect, load_accounts
@@ -257,7 +256,7 @@ def main() -> None:
     text, html_body = build_text(recent), build_html(recent)
     print(f"\nSubject: {subject}\n\n{text}\n")
 
-    preview = Path("data/preview.html")
+    preview = paths.PREVIEW
     preview.write_text(f"<!doctype html><meta charset='utf-8'><body style='background:#fff'>{html_body}")
     if args.live:
         deliver(subject, text, html_body)

@@ -1,21 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  launchd = macOS's built-in scheduler. This file tells it:
-  "at 08:00 and 18:00, run the summary with --live, from the project folder".
-  If the Mac is asleep at that time, launchd runs it as soon as the Mac wakes.
-  Install:   cp this file to ~/Library/LaunchAgents/ and `launchctl load` it (see README steps).
+  launchd = macOS's built-in scheduler. This tells it: "at 08:00 and 18:00, run the
+  summary with --live, from the stable copy of the code". If the Mac is asleep at that
+  time, launchd runs it as soon as the Mac wakes.
+  Don't edit the __PLACEHOLDERS__: scripts/install-schedule.sh fills them in.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.sidrianchan.email-organiser.digest</string>
+    <string>com.email-organiser.digest</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>-m</string>
-        <string>uv</string>
+        <string>__UV__</string>
         <string>run</string>
         <string>python</string>
         <string>-m</string>
@@ -24,13 +22,13 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/sid/projects/email-organiser</string>
+    <string>__CODE_DIR__</string>
 
     <!-- launchd starts with an almost empty PATH; this lets the script find `claude`. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/sid/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>__PATH__</string>
     </dict>
 
     <key>StartCalendarInterval</key>
@@ -39,10 +37,9 @@
         <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
     </array>
 
-    <!-- Everything the run prints goes here (data/ is git-ignored). -->
     <key>StandardOutPath</key>
-    <string>/Users/sid/projects/email-organiser/data/logs/digest.log</string>
+    <string>__LOG__</string>
     <key>StandardErrorPath</key>
-    <string>/Users/sid/projects/email-organiser/data/logs/digest.log</string>
+    <string>__LOG__</string>
 </dict>
 </plist>

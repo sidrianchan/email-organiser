@@ -4,12 +4,14 @@ import tomllib
 import keyring
 from imapclient import IMAPClient
 
+from . import paths
+
 SERVICE = "email-organiser"  # the Keychain label store_password.py saves under
 
 
 def load_accounts() -> list[dict]:
     """accounts.toml holds names, servers and addresses. No passwords."""
-    with open("accounts.toml", "rb") as f:
+    with open(paths.ACCOUNTS, "rb") as f:
         return tomllib.load(f)["account"]
 
 
