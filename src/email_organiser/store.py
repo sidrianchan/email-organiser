@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS messages (
 # Milestone 4: drafts    = emails that already have a reply draft, so none gets two.
 # Milestone 5: moved     = emails moved to Assistant-Review (later: what you drag back = a wrong label).
 # Screener:    screened  = job alerts already read; jobs = one row per job found (deduplicated).
+# 5b:          unsub_headers  = each email's unsubscribe link, saved at fetch (you may delete the email)
+#              sender_choices = per sender: unsubscribed / by_hand / keep / just shown (NULL)
+#              nudges         = weeks the Telegram "senders to review" nudge went out
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -77,6 +80,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     found_at TEXT DEFAULT (datetime('now')),
     shown_at TEXT
+);
+CREATE TABLE IF NOT EXISTS unsub_headers (
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    url TEXT, mailto TEXT, one_click INTEGER, signed INTEGER,
+    missing INTEGER DEFAULT 0,     -- 1 = email was already gone when we looked
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS sender_choices (
+    sender_key TEXT PRIMARY KEY,   -- "address|display name"
+    status TEXT, decided_at TEXT, shown_at TEXT, detail TEXT
+);
+CREATE TABLE IF NOT EXISTS nudges (
+    week TEXT PRIMARY KEY, sent_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
@@ -127,6 +143,18 @@ def save_if_new(db: sqlite3.Connection, account: str, uidvalidity: int,
     )
     # rowcount = how many rows that statement changed: 1 = new, 0 = seen before.
     return cur.rowcount == 1
+
+
+def save_unsub(db: sqlite3.Connection, account: str, uidvalidity: int, uid: int,
+               info: dict | None) -> None:
+    """Save an email's unsubscribe options. None = the email was already gone (so: unknown)."""
+    missing = int(info is None)
+    info = info or {}
+    db.execute("INSERT OR IGNORE INTO unsub_headers "
+               "(account, uidvalidity, uid, url, mailto, one_click, signed, missing) "
+               "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+               (account, uidvalidity, uid, info.get("url"), info.get("mailto"),
+                info.get("one_click", 0), info.get("signed", 0), missing))
 
 
 def arrived(row) -> datetime:

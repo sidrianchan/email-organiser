@@ -17,6 +17,7 @@ from email import policy
 from imapclient import IMAPClient
 
 from . import store
+from .unsubscribe import header_info
 from .mail import connect, load_accounts
 
 HOURS = 24            # how far back to look
@@ -62,6 +63,7 @@ def parse_message(raw: bytes) -> dict:
         "subject": str(msg["Subject"] or ""),
         "date": str(msg["Date"] or ""),
         "snippet": body_text(msg)[:SNIPPET_CHARS],  # design rule 6: keep only the start
+        "unsub": header_info(msg),  # milestone 5b: the unsubscribe link, kept in case you delete the email
     }
 
 
@@ -100,6 +102,7 @@ def fetch_new(db, hours: int, show: bool = True) -> int:
                 continue
             info = parse_message(raw)
             if store.save_if_new(db, account["name"], uidvalidity, uid, info):
+                store.save_unsub(db, account["name"], uidvalidity, uid, info["unsub"])
                 new += 1
                 if show:
                     print(f"  [{account['name']}] {info['sender'][:35]:<35} | {info['subject'][:60]}")

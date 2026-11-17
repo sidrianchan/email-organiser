@@ -1,6 +1,6 @@
 # Email Organiser
 
-A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-alert emails are screened first: the jobs in them are rated against my profile, and the ones worth applying to head the summary.
+A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-alert emails are screened first: the jobs in them are rated against my profile, and the ones worth applying to head the summary. Once a week a Telegram nudge reminds me to pick junk senders to unsubscribe from; a command on the Mac does the standard one-click unsubscribe for the ones I tick.
 
 **It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only. The only things it ever writes are the summary (placed in my own inbox) and reply drafts (placed in Drafts), and the only thing it changes is which folder junk sits in. I read, edit and send each draft myself, or delete it. A test fails if any sending code (`smtplib`, SMTP) ever appears.
 
@@ -60,6 +60,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `screener.py` | Reads job-alert emails, has Claude list and rate every job against my profile, keeps the high-fit ones (links checked, duplicates and jobs I've applied to removed) |
 | `cleanup.py` | Moves recent spam, promos and newsletters to `Assistant-Review` (never job mail, anything needing a reply, or job-board alerts) |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
+| `unsubscribe.py` | Lists junk senders, and for the ones I tick sends the RFC 8058 one-click unsubscribe (only when the sender's DKIM signature vouches for the link) |
 | `label_by_hand.py`, `evaluate.py` | The blind hand-labelling tool and the accuracy report |
 | `store.py`, `paths.py` | The SQLite database, kept in `~/.email-organiser/`, outside the code |
 
@@ -73,6 +74,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 6. **Secrets never sit in files.** App passwords live in the macOS Keychain. Personal data lives outside the repo.
 7. **Send the model as little as possible.** Sender, subject and the first 1,500 characters of the body.
 8. **Drafts never decide for me.** A draft never accepts, declines or promises anything; those become [gaps] I fill. Plain text only, no links. Junk (spam, promo, newsletter) never gets a draft, whatever the model says.
+9. **Unsubscribing needs my typed yes, and only uses the vouched-for link.** One-click (an HTTPS POST of `List-Unsubscribe=One-Click`) only when my mail provider verified a DKIM signature covering both unsubscribe headers. No cookies, no login, redirects not followed. Spam is never offered: unsubscribing tells a spammer the address is live.
 
 ## Things I found along the way
 
@@ -84,6 +86,8 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **Every provider is different.** The Drafts folder is `Draft` on Yahoo, `Drafts` on iCloud (found by name, because iCloud doesn't tag it) and `[Gmail]/Drafts` on Gmail. Yahoo returns an empty answer when asked for just two header fields (`HEADER.FIELDS`), so the first live test addressed a draft to the sender instead of the Reply-To address. The fix fetches the whole header. Yahoo also drops the `\Draft` flag on saved drafts; Mail.app still treats them as drafts because of the folder.
 - **iCloud can't MOVE.** Yahoo and Gmail support the IMAP `MOVE` command; iCloud doesn't. There, a move is copy → flag → `UID EXPUNGE` of exactly those emails. A plain `EXPUNGE` would also wipe anything else flagged as deleted, so the code refuses to run on a server without `UID EXPUNGE`.
 - **Job alerts are mostly links.** A Jobsdb alert is ~14,700 characters, mostly tracking URLs. The screener swaps every link for a tag like `[L3]` before Claude reads it; Claude answers with tags and the code puts the real link back, only if it points at the site that sent the email. Claude can't invent or redirect a link.
+- **One sender address, two kinds of mail.** Jobsdb sends my application updates *and* its recommendations from the same address; Workday sends application status with an unsubscribe link too. So unsubscribe candidates are grouped by name *and* address, and any sender that ever sent job or needs-reply mail is never offered.
+- **Google doesn't follow the header format.** The standard wraps unsubscribe links in `<...>`; Google sends them bare. The first real dry run listed Google Health as "no unsubscribe header" until the parser accepted both.
 - **Sender lists are brittle.** LinkedIn sends job alerts from three different addresses; the dry run caught one I'd missed (a "… are hiring" email) before anything moved.
 
 ## Setup
@@ -118,6 +122,10 @@ The Telegram ping carries counts only ("1 job, 2 to read"), never senders or sub
 because bot chats are not end-to-end encrypted. It is sent every run, even with no new
 mail, so a missing ping means the schedule broke. If Telegram fails, the summary is unaffected.
 
+Unsubscribing (weekly, after the Telegram nudge): `scripts/unsubscribe.sh` shows the list without
+changing anything; `scripts/unsubscribe.sh --live` asks which to unsubscribe from and which to keep,
+then asks for a typed "yes" before sending anything.
+
 Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 
 ## Status
@@ -132,7 +140,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 4 | Reply drafts in the Drafts folder (never sent) | ✓ |
 | 5a | Junk to a review folder (job alerts kept) | ✓ |
 | 5c | Job-alert screener: jobs worth applying to, in the summary | ✓ |
-| 5b | Weekly unsubscribe from senders I tick | next |
+| 5b | Weekly unsubscribe from senders I tick | ✓ |
 | 6 | Instant alert for recruiter and interview mail | |
 | 7 | Learns from my corrections, re-measured weekly | |
 

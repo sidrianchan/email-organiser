@@ -1,7 +1,8 @@
 """Milestone 3: the twice-daily summary.
 
 One run = fetch new mail -> Claude labels it -> job alerts screened -> reply drafts (milestone 4)
-          -> junk to Assistant-Review (milestone 5) -> build a summary -> put it in your inbox -> Telegram ping.
+          -> junk to Assistant-Review (milestone 5) -> build a summary -> put it in your inbox -> Telegram ping
+          -> once a week, a Telegram nudge to pick senders to unsubscribe from (milestone 5b).
 
 Dry run by default (design rule 0): prints the summary and changes nothing.
     python3 -m uv run python -m email_organiser.digest
@@ -21,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import cleanup, drafts, notify, paths, screener, store
+from . import cleanup, drafts, notify, paths, screener, store, unsubscribe
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
 from .mail import connect, load_accounts
@@ -290,6 +291,13 @@ def mark_done(db, rows: list) -> None:
 
 
 def main() -> None:
+    db, live = summarise()
+    if db is not None:
+        unsubscribe.weekly_nudge(db, live)   # never raises; after the ping
+
+
+def summarise():
+    """The summary run. Returns (database, live); database is None for a --sample preview (no nudge)."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="really deliver the summary")
     parser.add_argument("--sample", action="store_true",
@@ -326,7 +334,7 @@ def main() -> None:
         if args.live and not args.sample:
             mark_done(db, too_old)
             notify.ping(ping_counts(recent), 0, DELIVER_TO)  # still ping: silence would mean "broken"
-        return
+        return (None if args.sample else db), args.live
 
     subject = subject_line(sections(recent), len(recent), jobs)
     text, html_body = build_text(recent, jobs), build_html(recent, jobs)
@@ -347,6 +355,7 @@ def main() -> None:
         print(f"(dry run: Telegram ping not sent; it would say: {text}{'' if loud else '  [no sound]'})")
         if args.sample:
             subprocess.run(["open", str(preview)])  # show it in your browser
+    return (None if args.sample else db), args.live
 
 
 if __name__ == "__main__":
