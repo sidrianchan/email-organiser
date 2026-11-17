@@ -337,3 +337,136 @@ def test_summary_says_what_was_moved():
             row(uid=3, label="promo", moved=1), row(uid=4, label="fyi")]
     assert "Moved to Assistant-Review: 1 promo, 2 newsletter." in digest.build_text(rows)
     assert "Moved to Assistant-Review" in digest.build_html(rows)
+
+
+# --- job-alert screener ---------------------------------------------------------
+
+from email_organiser import notify, screener
+
+
+def alert_email(html_body: str) -> EmailMessage:
+    msg = EmailMessage()
+    msg["From"], msg["Subject"] = "Jobsdb <noreply@e.jobsdb.com>", "New jobs"
+    msg.set_content("plain version")
+    msg.add_alternative(html_body, subtype="html")
+    return msg
+
+
+def test_links_become_tags_and_keep_their_text():
+    msg = alert_email('<p>Hi</p><a href="https://url.jobsdb.com/a?x=1&amp;y=2">Data Analyst</a>'
+                      '<a href="https://url.jobsdb.com/b">Graduate Trainee</a>'
+                      '<a href="https://url.jobsdb.com/a?x=1&amp;y=2">again</a>')
+    text, links = screener.tag_links(msg)
+    assert "Data Analyst [L1]" in text and "Graduate Trainee [L2]" in text
+    assert "again [L1]" in text                         # same URL, same tag
+    assert "http" not in text                           # Claude never sees a URL
+    assert links == {"L1": "https://url.jobsdb.com/a?x=1&y=2", "L2": "https://url.jobsdb.com/b"}
+
+
+def test_only_links_to_the_sending_site_are_kept():
+    jobsdb = "Jobsdb <noreply@e.jobsdb.com>"
+    assert screener.safe_link("https://url.jobsdb.com/x", jobsdb)
+    assert screener.safe_link("https://www.linkedin.com/comm/jobs/view/1", "LinkedIn <jobs-noreply@linkedin.com>")
+    assert not screener.safe_link("https://evil.example/x", jobsdb)           # other site
+    assert not screener.safe_link("https://jobsdb.com.evil.example/x", jobsdb)  # look-alike
+    assert not screener.safe_link("http://url.jobsdb.com/x", jobsdb)          # not https
+    assert screener.site("mail.clp.com.hk") == "clp.com.hk"
+
+
+def test_same_job_in_two_alerts_is_stored_once(db):
+    r = row(uid=1)
+    a = {"row": r}
+    job = dict(title="Data Analyst", company="Acme Ltd", location="HK", closing="",
+               fit="high", reason="fits", url="", row=r)
+    again = job | {"title": "Data  analyst!", "company": "ACME LTD"}
+    assert screener.save(db, [a], [job, again]) == 1
+    assert len(screener.unshown_high(db)) == 1
+
+
+def test_screener_candidates(db):
+    save_labelled(db, 1, "newsletter", sender="Jobsdb <noreply@e.jobsdb.com>")   # job board
+    save_labelled(db, 2, "newsletter", sender="Careers <a@uni.example>")         # flagged below
+    db.execute("UPDATE claude_labels SET job_alert = 1 WHERE uid = 2")
+    save_labelled(db, 3, "newsletter")                                           # ordinary
+    save_labelled(db, 4, "job", sender="Jobsdb <noreply@e.jobsdb.com>")         # application news
+    assert sorted(r["uid"] for r in screener.pending(db)) == [1, 2]
+
+
+def test_job_alert_moves_only_after_screening(db):
+    save_labelled(db, 1, "newsletter", sender="LinkedIn <jobalerts-noreply@linkedin.com>")
+    to_move, held = cleanup.pending(db)
+    assert [r["uid"] for r in held] == [1] and not to_move
+    db.execute("INSERT INTO screened (account, uidvalidity, uid, jobs_found) VALUES ('yahoo', 1, 1, 3)")
+    to_move, held = cleanup.pending(db)
+    assert [r["uid"] for r in to_move] == [1] and not held
+
+
+def test_no_profile_means_no_screening(db, monkeypatch, tmp_path, capsys):
+    save_labelled(db, 1, "newsletter", sender="Jobsdb <noreply@e.jobsdb.com>")
+    monkeypatch.setattr(screener.paths, "PROFILE", tmp_path / "missing.md")
+    monkeypatch.setattr(screener, "read_alerts", lambda rows: pytest.fail("should not read mail"))
+    assert screener.run(db, live=True) == 0
+    assert "No profile" in capsys.readouterr().out
+
+
+def test_good_jobs_lead_the_summary_and_ping():
+    jobs = [dict(title="Graduate <b>Analyst</b>", company="Acme", location="HK", closing="30 Nov",
+                 reason="graduate role", url="https://url.jobsdb.com/x")]
+    html_body = digest.build_html([row()], jobs)
+    assert "Jobs worth applying to" in html_body and "<b>Analyst" not in html_body  # escaped
+    assert html_body.index("Jobs worth applying to") < html_body.index("Everything else")
+    assert "JOBS WORTH APPLYING TO (1)" in digest.build_text([row()], jobs)
+    assert "1 good job" in digest.subject_line(digest.sections([row()]), 1, jobs)
+    text, loud = notify.message(digest.ping_counts([row()], jobs), 1, "yahoo")
+    assert "1 good job" in text and loud and "Acme" not in text
+
+
+def test_screener_failure_never_stops_the_summary(db, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("claude is down")
+    monkeypatch.setattr(digest, "fetch_new", lambda *a, **k: 0)
+    monkeypatch.setattr(digest, "classify_pending", lambda db: 0)
+    monkeypatch.setattr(digest.screener, "run", boom)
+    monkeypatch.setattr(digest.drafts, "make_drafts", lambda *a, **k: 0)
+    monkeypatch.setattr(digest.cleanup, "run", lambda *a, **k: 0)
+    monkeypatch.setattr(digest.store, "open_db", lambda: db)
+    monkeypatch.setattr("sys.argv", ["digest"])
+    digest.main()
+    assert "Screener FAILED (summary unaffected)" in capsys.readouterr().out
+
+
+def test_jobs_already_applied_to_are_skipped(tmp_path, monkeypatch):
+    f = tmp_path / "applied.tsv"
+    f.write_text("# header\nAIA International Limited\tAIA | Business Consultant Trainee\tApplied\t2026-11-12\n")
+    monkeypatch.setattr(screener.paths, "APPLIED", f)
+    applied = screener.load_applied()
+    assert screener.already_applied({"company": "AIA", "title": "AIA | Business Consultant Trainee"}, applied)
+    assert not screener.already_applied({"company": "AIA", "title": "Data Analyst"}, applied)
+    assert not screener.already_applied({"company": "Manulife", "title": "AIA | Business Consultant Trainee"}, applied)
+    monkeypatch.setattr(screener.paths, "APPLIED", tmp_path / "missing.tsv")
+    assert screener.load_applied() == set()
+
+
+def test_cut_or_reworded_titles_still_match():
+    applied = {("king", screener.norm("Finance and investment trainee (Fresh Graduate/IANG/Mandarin Speaking Welcome)"))}
+    assert screener.already_applied({"company": "King View Human Resources",
+                                     "title": "Finance and investment trainee (Fresh Graduate/IANG)"}, applied)
+    a = {"company": "Morgan Mckinley Limited", "title": "Technology Analyst (AI Project) / 6 months extendable"}
+    b = {"company": "Morgan McKinley", "title": "Technology Analyst (AI Project) / 6 months extendable / Banking"}
+    assert screener.job_key(a) == screener.job_key(b)
+    assert not screener.same_title("Data Analyst", "Data Engineer")
+
+
+def test_commission_roles_are_tagged_in_the_summary():
+    jobs = [dict(title="Wealth Management Trainee", company="AIA", location="HK", closing="",
+                 reason="fresh grads", url="", commission=1),
+            dict(title="Data Analyst", company="Acme", location="HK", closing="",
+                 reason="fits", url="", commission=0)]
+    text = digest.build_text([row()], jobs)
+    assert "Wealth Management Trainee, AIA, HK  [likely commission-based]" in text
+    assert "Data Analyst, Acme, HK  [likely" not in text
+    assert digest.build_html([row()], jobs).count("likely commission-based") == 1
+
+
+def test_prompt_rates_uk_outside_london_medium():
+    assert "outside Hong Kong and London (including the rest of the UK)" in screener.SYSTEM_PROMPT

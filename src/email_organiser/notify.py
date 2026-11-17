@@ -35,17 +35,20 @@ API = "https://api.telegram.org/bot{token}/{method}"
 
 
 def message(counts: dict, total: int, account: str) -> tuple[str, bool]:
-    """(text, loud). counts has 'job', 'reply', 'read' as numbers. No email content goes in."""
+    """(text, loud). counts has 'job', 'reply', 'read' (and optionally 'jobs': good jobs
+    found by the screener) as numbers. No email content goes in."""
     stamp = datetime.now().strftime("%H:%M")
     if total == 0:
         return f"{stamp} mail: no new email.", False
-    bits = [f"{counts['job']} job" if counts["job"] else "",
+    good = counts.get("jobs", 0)
+    bits = [f"{good} good job{'s' if good > 1 else ''}" if good else "",
+            f"{counts['job']} job" if counts["job"] else "",
             f"{counts['reply']} to reply" if counts["reply"] else "",
             f"{counts['read']} to read" if counts["read"] else ""]
     bits = [b for b in bits if b]
     if not bits:
         return f"{stamp} mail: nothing needs you ({total} routine).", False
-    loud = bool(counts["job"] or counts["reply"])  # only these are worth a sound
+    loud = bool(counts["job"] or counts["reply"] or good)  # only these are worth a sound
     return f"{stamp} mail: {', '.join(bits)}. Check {account.capitalize()}.", loud
 
 

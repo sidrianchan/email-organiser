@@ -1,6 +1,6 @@
 # Email Organiser
 
-A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-board alerts stay put.
+A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-alert emails are screened first: the jobs in them are rated against my profile, and the ones worth applying to head the summary.
 
 **It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only. The only things it ever writes are the summary (placed in my own inbox) and reply drafts (placed in Drafts), and the only thing it changes is which folder junk sits in. I read, edit and send each draft myself, or delete it. A test fails if any sending code (`smtplib`, SMTP) ever appears.
 
@@ -57,6 +57,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `fetch.py` | Downloads the last day of mail without marking it read; remembers what it has seen |
 | `classify.py` | Sends emails to Claude in batches of 20; gets back a type, a needs-reply flag and a reason |
 | `drafts.py` | Writes reply drafts for emails that need one and places them in each account's Drafts folder |
+| `screener.py` | Reads job-alert emails, has Claude list and rate every job against my profile, keeps the high-fit ones (links checked, duplicates and jobs I've applied to removed) |
 | `cleanup.py` | Moves recent spam, promos and newsletters to `Assistant-Review` (never job mail, anything needing a reply, or job-board alerts) |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
 | `label_by_hand.py`, `evaluate.py` | The blind hand-labelling tool and the accuracy report |
@@ -82,6 +83,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - IMAP's `SINCE` search only understands dates, not times, so the code over-fetches and trims. Yahoo also rejects `HEADER` searches.
 - **Every provider is different.** The Drafts folder is `Draft` on Yahoo, `Drafts` on iCloud (found by name, because iCloud doesn't tag it) and `[Gmail]/Drafts` on Gmail. Yahoo returns an empty answer when asked for just two header fields (`HEADER.FIELDS`), so the first live test addressed a draft to the sender instead of the Reply-To address. The fix fetches the whole header. Yahoo also drops the `\Draft` flag on saved drafts; Mail.app still treats them as drafts because of the folder.
 - **iCloud can't MOVE.** Yahoo and Gmail support the IMAP `MOVE` command; iCloud doesn't. There, a move is copy → flag → `UID EXPUNGE` of exactly those emails. A plain `EXPUNGE` would also wipe anything else flagged as deleted, so the code refuses to run on a server without `UID EXPUNGE`.
+- **Job alerts are mostly links.** A Jobsdb alert is ~14,700 characters, mostly tracking URLs. The screener swaps every link for a tag like `[L3]` before Claude reads it; Claude answers with tags and the code puts the real link back, only if it points at the site that sent the email. Claude can't invent or redirect a link.
 - **Sender lists are brittle.** LinkedIn sends job alerts from three different addresses; the dry run caught one I'd missed (a "… are hiring" email) before anything moved.
 
 ## Setup
@@ -129,6 +131,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 3.5 | Telegram ping after each summary (counts only) | ✓ |
 | 4 | Reply drafts in the Drafts folder (never sent) | ✓ |
 | 5a | Junk to a review folder (job alerts kept) | ✓ |
+| 5c | Job-alert screener: jobs worth applying to, in the summary | ✓ |
 | 5b | Weekly unsubscribe from senders I tick | next |
 | 6 | Instant alert for recruiter and interview mail | |
 | 7 | Learns from my corrections, re-measured weekly | |

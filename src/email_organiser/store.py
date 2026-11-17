@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
 # Milestone 3: digested = emails already shown in a summary, so none appears twice.
 # Milestone 4: drafts    = emails that already have a reply draft, so none gets two.
 # Milestone 5: moved     = emails moved to Assistant-Review (later: what you drag back = a wrong label).
+# Screener:    screened  = job alerts already read; jobs = one row per job found (deduplicated).
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -64,6 +65,19 @@ CREATE TABLE IF NOT EXISTS moved (
     moved_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (account, uidvalidity, uid)
 );
+CREATE TABLE IF NOT EXISTS screened (
+    account TEXT, uidvalidity INTEGER, uid INTEGER, jobs_found INTEGER,
+    screened_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    job_key TEXT PRIMARY KEY,
+    title TEXT, company TEXT, location TEXT, closing TEXT,
+    fit TEXT, reason TEXT, url TEXT, commission INTEGER,
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    found_at TEXT DEFAULT (datetime('now')),
+    shown_at TEXT
+);
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     label TEXT NOT NULL,
@@ -82,6 +96,8 @@ def open_db() -> sqlite3.Connection:
     db.executescript(LABEL_SCHEMA)
     _add_column_if_missing(db, "claude_labels", "needs_reply", "INTEGER")
     _add_column_if_missing(db, "my_labels", "needs_reply", "INTEGER")
+    _add_column_if_missing(db, "claude_labels", "job_alert", "INTEGER")
+    _add_column_if_missing(db, "jobs", "commission", "INTEGER")
     return db
 
 

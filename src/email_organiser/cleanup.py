@@ -11,7 +11,7 @@ For real:
 
 The model labels; the code acts (design rule 4). Plain rules below decide what moves:
   * job emails and anything that needs a reply never move, whatever the label says
-  * job-board alerts stay in the inbox until the job-alert screener exists
+  * job alerts stay in the inbox until the screener has read them (screener.py)
   * only mail from the last 48h (the backlog is left alone for now)
   * at most MAX_MOVES per run, so a bug can't empty an inbox
 """
@@ -30,7 +30,7 @@ MOVE_LABELS = ("spam", "promo", "newsletter")
 MAX_AGE_HOURS = 48
 MAX_MOVES = 30
 
-# Job-alert senders: kept in the inbox for the job-alert screener (next milestone).
+# Job-board senders: their mail is screened for jobs before it may move (screener.py).
 # A domain matches itself and its subdomains (e.jobsdb.com matches jobsdb.com).
 JOB_BOARD_DOMAINS = (
     "jobsdb.com", "ctgoodjobs.hk", "recruit.com.hk", "indeed.com", "glassdoor.com",
@@ -51,20 +51,24 @@ def is_job_board(sender: str) -> bool:
 
 
 def pending(db) -> tuple[list, list]:
-    """(to_move, held_job_alerts). Recent junk that hasn't been moved yet."""
+    """(to_move, held_job_alerts). Recent junk that hasn't been moved yet.
+    A job alert (Claude flagged it, or it's from a job board) is held until it's screened."""
     marks = ",".join("?" * len(MOVE_LABELS))
     rows = db.execute(f"""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.date, m.first_seen,
-               c.label, c.needs_reply
+               c.label, c.needs_reply, c.job_alert, s.uid IS NOT NULL AS screened
         FROM messages m
         JOIN claude_labels c USING (account, uidvalidity, uid)
         LEFT JOIN moved mv USING (account, uidvalidity, uid)
+        LEFT JOIN screened s USING (account, uidvalidity, uid)
         WHERE mv.uid IS NULL AND c.label IN ({marks}) AND COALESCE(c.needs_reply, 0) = 0
     """, MOVE_LABELS).fetchall()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
     recent = [r for r in rows if arrived(r) >= cutoff]
-    held = [r for r in recent if is_job_board(r["sender"])]
-    return [r for r in recent if not is_job_board(r["sender"])], held
+    def waiting(r) -> bool:
+        return bool(r["job_alert"] or is_job_board(r["sender"])) and not r["screened"]
+    held = [r for r in recent if waiting(r)]
+    return [r for r in recent if not waiting(r)], held
 
 
 def move(client, uids: list[int]) -> None:
@@ -124,7 +128,7 @@ def run(db, live: bool) -> int:
     if len(rows) > MAX_MOVES:
         print(f"{len(rows)} to move; capped at {MAX_MOVES} this run, the rest next run")
         rows = rows[:MAX_MOVES]
-    print(f"{len(rows)} emails to move to {REVIEW}; {len(held)} job alerts kept in the inbox")
+    print(f"{len(rows)} emails to move to {REVIEW}; {len(held)} job alerts kept until screened")
     if not live:
         for r in rows:
             print(f"  would move [{r['account']}] {r['label']:<10} {r['subject'][:60]}")

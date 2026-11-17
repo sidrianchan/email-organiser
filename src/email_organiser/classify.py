@@ -12,7 +12,7 @@ import json
 import subprocess
 
 from . import store
-from .labels import NAMES, REPLY_RULE, describe
+from .labels import JOB_ALERT_RULE, NAMES, REPLY_RULE, describe
 
 BATCH_SIZE = 20  # emails per Claude call: fewer calls = less of your Pro usage
 
@@ -22,6 +22,8 @@ Give every email exactly one type. If several fit, use the one that comes FIRST 
 {describe()}
 
 Separately, decide needs_reply (true/false): {REPLY_RULE}
+
+And separately, decide {JOB_ALERT_RULE}
 
 For each email, also write a reason of at most 15 words.
 
@@ -42,9 +44,10 @@ SCHEMA = {
                     "id": {"type": "integer"},
                     "label": {"type": "string", "enum": NAMES},
                     "needs_reply": {"type": "boolean"},
+                    "job_alert": {"type": "boolean"},
                     "reason": {"type": "string"},
                 },
-                "required": ["id", "label", "needs_reply", "reason"],
+                "required": ["id", "label", "needs_reply", "job_alert", "reason"],
             },
         }
     },
@@ -115,10 +118,10 @@ def classify_pending(db) -> int:
                 continue
             db.execute(
                 "INSERT OR REPLACE INTO claude_labels "
-                "(account, uidvalidity, uid, label, needs_reply, reason, model) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(account, uidvalidity, uid, label, needs_reply, job_alert, reason, model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (r["account"], r["uidvalidity"], r["uid"], a["label"],
-                 int(a["needs_reply"]), a["reason"], model),
+                 int(a["needs_reply"]), int(a.get("job_alert", False)), a["reason"], model),
             )
             done += 1
         db.commit()  # save after every batch, so a later failure loses nothing

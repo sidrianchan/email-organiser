@@ -6,6 +6,8 @@
         logs/           what each scheduled run printed
         preview.html    the last summary preview
         telegram_chat   which Telegram chat gets the ping (the bot token is in Keychain)
+        profile.md      your CV in brief, for the job-alert screener
+        applied.tsv     jobs you've applied to (company<TAB>title...), never suggested again
 
 Keeping personal data away from the code means:
   * the code can be public on GitHub with nothing personal anywhere near it, and
@@ -22,3 +24,5 @@ DB = HOME / "mail.db"
 LOGS = HOME / "logs"
 PREVIEW = HOME / "preview.html"
 TELEGRAM_CHAT = HOME / "telegram_chat"
+PROFILE = HOME / "profile.md"     # who the job screener scores against (no name or contacts)
+APPLIED = HOME / "applied.tsv"    # jobs already applied to: never suggested again

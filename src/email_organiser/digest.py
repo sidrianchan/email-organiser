@@ -1,6 +1,6 @@
 """Milestone 3: the twice-daily summary.
 
-One run = fetch new mail -> Claude labels it -> reply drafts (milestone 4)
+One run = fetch new mail -> Claude labels it -> job alerts screened -> reply drafts (milestone 4)
           -> junk to Assistant-Review (milestone 5) -> build a summary -> put it in your inbox -> Telegram ping.
 
 Dry run by default (design rule 0): prints the summary and changes nothing.
@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import cleanup, drafts, notify, paths, store
+from . import cleanup, drafts, notify, paths, screener, store
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
 from .mail import connect, load_accounts
@@ -63,10 +63,10 @@ def sections(rows: list) -> dict:
     }
 
 
-def ping_counts(rows: list) -> dict:
+def ping_counts(rows: list, jobs: list = ()) -> dict:
     """Just the numbers for the Telegram ping: no subjects or senders leave the Mac."""
     g = sections(rows)
-    return {k: len(g[k]) for k in ("job", "reply", "read")}
+    return {k: len(g[k]) for k in ("job", "reply", "read")} | {"jobs": len(jobs)}
 
 
 def collapse(rows: list) -> tuple[list, list]:
@@ -113,10 +113,11 @@ def when(r) -> str:
     return t.strftime("%H:%M") if t.date() == datetime.now().date() else t.strftime("%a %H:%M")
 
 
-def subject_line(g: dict, total: int) -> str:
+def subject_line(g: dict, total: int, jobs: list = ()) -> str:
     stamp = datetime.now().strftime("%a %H:%M")
-    if g["job"] or g["reply"] or g["read"]:
-        bits = [f"{len(g['job'])} job" if g["job"] else "",
+    if jobs or g["job"] or g["reply"] or g["read"]:
+        bits = [f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
+                f"{len(g['job'])} job" if g["job"] else "",
                 f"{len(g['reply'])} to reply" if g["reply"] else "",
                 f"{len(g['read'])} to read" if g["read"] else ""]
         return f"Mail summary {stamp}: " + ", ".join(b for b in bits if b)
@@ -130,10 +131,25 @@ GROUPS = [  # (key, heading, colour)
 ]
 
 
-def build_text(rows: list) -> str:
+def is_commission(j) -> bool:
+    return "commission" in j.keys() and bool(j["commission"])
+
+
+def job_line(j) -> str:
+    """'Data Analyst, Acme, Kwun Tong, closes 30 Nov' (empty parts left out)."""
+    closing = f"closes {j['closing']}" if j["closing"] else ""
+    return ", ".join(x for x in (j["title"], j["company"], j["location"], closing) if x)
+
+
+def build_text(rows: list, jobs: list = ()) -> str:
     """Plain-text version, for mail apps that don't show HTML."""
     g = sections(rows)
     out = [f"{len(rows)} new emails since the last summary", ""]
+    if jobs:
+        out += [f"JOBS WORTH APPLYING TO ({len(jobs)})", "-" * 30]
+        for j in jobs:
+            tag = "  [likely commission-based]" if is_commission(j) else ""
+            out += [f"* {job_line(j)}{tag}", f"  {j['reason']}"] + ([f"  {j['url']}"] if j["url"] else []) + [""]
     for key, heading, _ in GROUPS:
         if g[key]:
             out += [f"{heading.upper()} ({len(g[key])})", "-" * 30]
@@ -158,7 +174,7 @@ def build_text(rows: list) -> str:
     return "\n".join(out)
 
 
-def build_html(rows: list) -> str:
+def build_html(rows: list, jobs: list = ()) -> str:
     """The nicer version. Styles are inline because many mail apps strip <style> blocks.
 
     Every piece of email text goes through html.escape(): a sender could put HTML
@@ -173,10 +189,31 @@ def build_html(rows: list) -> str:
                 f'border-radius:12px;background:{colour}1a;color:{colour};font-size:13px;'
                 f'font-weight:600">{e(text)}</span>')
 
-    chips = "".join(chip(f"{len(g[k])} {h.lower()}", c) for k, h, c in GROUPS if g[k])
+    chips = (chip(f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}", "#0d9488") if jobs else "") + \
+        "".join(chip(f"{len(g[k])} {h.lower()}", c) for k, h, c in GROUPS if g[k])
     chips = chips or chip("Nothing needs you", "#6b7280")
 
     body = []
+    if jobs:  # first: the point of the whole job hunt
+        teal = "#0d9488"
+        body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {teal};'
+                    f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
+                    f'color:{teal}">Jobs worth applying to &middot; {len(jobs)}</div>')
+        for j in jobs:
+            title = e(j["title"])
+            if j["url"]:  # only links the screener checked point at the sending job board
+                title = f'<a href="{e(j["url"])}" style="color:#111827;text-decoration:underline">{title}</a>'
+            if is_commission(j):
+                title += (' <span style="padding:1px 7px;border-radius:9px;background:#b453091a;'
+                          'color:#b45309;font-size:11px;font-weight:600">likely commission-based</span>')
+            where = " &middot; ".join(e(x) for x in (j["company"], j["location"],
+                                                    f"closes {j['closing']}" if j["closing"] else "") if x)
+            body.append(
+                '<div style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
+                f'<div style="font-size:15px;font-weight:600;color:#111827;line-height:1.35">{title}</div>'
+                f'<div style="font-size:13px;color:#4b5563;margin-top:2px">{where}</div>'
+                f'<div style="font-size:13px;color:#6b7280;margin-top:3px">{e(j["reason"] or "")}</div>'
+                '</div>')
     for key, heading, colour in GROUPS:
         if not g[key]:
             continue
@@ -268,6 +305,10 @@ def main() -> None:
         fetch_new(db, LOOKBACK_HOURS, show=False)
         classify_pending(db)
         try:
+            screener.run(db, live=args.live)
+        except Exception as e:  # a screening problem must never stop the summary
+            print(f"Screener FAILED (summary unaffected): {e}")
+        try:
             drafts.make_drafts(db, live=args.live)
         except Exception as e:  # a drafting problem must never stop the summary
             print(f"Drafts FAILED (summary unaffected): {e}")
@@ -277,6 +318,7 @@ def main() -> None:
             print(f"Clean-up FAILED (summary unaffected): {e}")
 
     recent, too_old = pending(db)
+    jobs = screener.unshown_high(db)
     if too_old and not args.sample:
         print(f"{len(too_old)} older emails skipped (over {MAX_AGE_HOURS}h old)")
     if not recent:
@@ -286,8 +328,8 @@ def main() -> None:
             notify.ping(ping_counts(recent), 0, DELIVER_TO)  # still ping: silence would mean "broken"
         return
 
-    subject = subject_line(sections(recent), len(recent))
-    text, html_body = build_text(recent), build_html(recent)
+    subject = subject_line(sections(recent), len(recent), jobs)
+    text, html_body = build_text(recent, jobs), build_html(recent, jobs)
     print(f"\nSubject: {subject}\n\n{text}\n")
 
     preview = paths.PREVIEW
@@ -296,11 +338,12 @@ def main() -> None:
         deliver(subject, text, html_body)
         if not args.sample:
             mark_done(db, recent + too_old)  # only after delivery worked
+            screener.mark_shown(db, jobs)
         print(f"Delivered to your {DELIVER_TO} inbox.")
-        notify.ping(ping_counts(recent), len(recent), DELIVER_TO)  # after delivery; can't undo it
+        notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO)  # after delivery; can't undo it
     else:
         print(f"(dry run: nothing delivered. HTML preview: {preview})")
-        text, loud = notify.message(ping_counts(recent), len(recent), DELIVER_TO)
+        text, loud = notify.message(ping_counts(recent, jobs), len(recent), DELIVER_TO)
         print(f"(dry run: Telegram ping not sent; it would say: {text}{'' if loud else '  [no sound]'})")
         if args.sample:
             subprocess.run(["open", str(preview)])  # show it in your browser

@@ -26,6 +26,10 @@ LABELS = {
 REPLY_RULE = ("needs_reply = true if a real person or organisation expects Sid to answer "
               "or send something back by email. Automatic notifications are false.")
 
+JOB_ALERT_RULE = ("job_alert = true if the email lists one or more specific job openings "
+                  "(job alerts, job recommendations, 'X is hiring'). Profile or engagement "
+                  "reminders, career tips, hiring statistics and application updates are false.")
+
 NAMES = list(LABELS)  # ["job", "spam", ...] in priority order
 
 
