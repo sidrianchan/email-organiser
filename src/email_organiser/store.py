@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 # Milestone 3: digested = emails already shown in a summary, so none appears twice.
 # Milestone 4: drafts    = emails that already have a reply draft, so none gets two.
+# Milestone 5: moved     = emails moved to Assistant-Review (later: what you drag back = a wrong label).
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -56,6 +57,11 @@ CREATE TABLE IF NOT EXISTS drafts (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     folder TEXT, draft_message_id TEXT,
     drafted_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS moved (
+    account TEXT, uidvalidity INTEGER, uid INTEGER, folder TEXT,
+    moved_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (account, uidvalidity, uid)
 );
 CREATE TABLE IF NOT EXISTS my_labels (

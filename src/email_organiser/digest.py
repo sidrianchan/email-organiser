@@ -1,7 +1,7 @@
 """Milestone 3: the twice-daily summary.
 
 One run = fetch new mail -> Claude labels it -> reply drafts (milestone 4)
-          -> build a summary -> put it in your inbox -> Telegram ping.
+          -> junk to Assistant-Review (milestone 5) -> build a summary -> put it in your inbox -> Telegram ping.
 
 Dry run by default (design rule 0): prints the summary and changes nothing.
     python3 -m uv run python -m email_organiser.digest
@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import drafts, notify, paths, store
+from . import cleanup, drafts, notify, paths, store
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
 from .mail import connect, load_accounts
@@ -38,11 +38,13 @@ def pending(db) -> tuple[list, list]:
     """(recent, too_old): labelled emails that haven't been in a summary yet."""
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.date, m.first_seen,
-               c.label, c.needs_reply, c.reason, dr.uid IS NOT NULL AS drafted
+               c.label, c.needs_reply, c.reason, dr.uid IS NOT NULL AS drafted,
+               mv.uid IS NOT NULL AS moved
         FROM messages m
         JOIN claude_labels c USING (account, uidvalidity, uid)
         LEFT JOIN digested d USING (account, uidvalidity, uid)
         LEFT JOIN drafts dr USING (account, uidvalidity, uid)
+        LEFT JOIN moved mv USING (account, uidvalidity, uid)
         WHERE d.uid IS NULL
     """).fetchall()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
@@ -86,6 +88,15 @@ def group_subjects(rs: list, limit: int = 4) -> str:
     seen = list(dict.fromkeys(r["subject"] or "(no subject)" for r in rs))  # unique, in order
     more = f" +{len(seen) - limit} more" if len(seen) > limit else ""
     return " / ".join(seen[:limit]) + more
+
+
+def moved_line(rows: list) -> str:
+    """'Moved to Assistant-Review: 3 newsletter, 1 promo.' or '' if nothing moved."""
+    moved = [r for r in rows if "moved" in r.keys() and r["moved"]]
+    if not moved:
+        return ""
+    counts = {name: sum(r["label"] == name for r in moved) for name in cleanup.MOVE_LABELS}
+    return f"Moved to {cleanup.REVIEW}: " + ", ".join(f"{n} {k}" for k, n in counts.items() if n) + "."
 
 
 def has_draft(r) -> bool:
@@ -141,7 +152,9 @@ def build_text(rows: list) -> str:
     routine = ", ".join(f"{n} {name}" for name, n in g["counts"].items() if n)
     if routine:
         out.append(f"Everything else: {routine}.")
-    out.append("\nLabelled by Claude. Nothing was moved, deleted or sent.")
+    if moved_line(rows):
+        out.append(moved_line(rows))
+    out.append("\nLabelled by Claude. Nothing was deleted or sent.")
     return "\n".join(out)
 
 
@@ -201,7 +214,9 @@ def build_html(rows: list) -> str:
 
     routine = " &middot; ".join(f"{n} {e(name)}" for name, n in g["counts"].items() if n)
     footer = (f'<div style="margin-top:22px;padding:12px 14px;border-radius:8px;background:#f6f7f9;'
-              f'font-size:13px;color:#4b5563">Everything else: {routine or "none"}</div>')
+              f'font-size:13px;color:#4b5563">Everything else: {routine or "none"}'
+              + (f'<div style="margin-top:4px">{e(moved_line(rows))}</div>' if moved_line(rows) else "")
+              + '</div>')
     stamp = datetime.now().strftime("%a %d %b &middot; %H:%M")
 
     return (f'<div style="font-family:{font};max-width:600px;margin:0 auto;padding:8px 4px;color:#111827">'
@@ -211,7 +226,7 @@ def build_html(rows: list) -> str:
             f'<div style="font-size:13px;color:#6b7280">{len(rows)} new emails since the last summary</div>'
             + "".join(body) + footer +
             '<div style="margin-top:14px;font-size:12px;color:#9ca3af">'
-            'Labelled by Claude. Nothing was moved, deleted or sent.</div></div>')
+            'Labelled by Claude. Nothing was deleted or sent.</div></div>')
 
 
 def deliver(subject: str, text: str, html_body: str) -> None:
@@ -256,6 +271,10 @@ def main() -> None:
             drafts.make_drafts(db, live=args.live)
         except Exception as e:  # a drafting problem must never stop the summary
             print(f"Drafts FAILED (summary unaffected): {e}")
+        try:
+            cleanup.run(db, live=args.live)
+        except Exception as e:  # nor a moving problem
+            print(f"Clean-up FAILED (summary unaffected): {e}")
 
     recent, too_old = pending(db)
     if too_old and not args.sample:

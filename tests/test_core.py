@@ -226,3 +226,114 @@ def test_no_sending_code_exists():
         text = f.read_text()
         for word in forbidden:
             assert word not in text, f"{word} found in {f.name}"
+
+
+# --- milestone 5: junk to Assistant-Review --------------------------------------
+
+from email_organiser import cleanup
+
+
+def save_labelled(db, uid, label, sender="a@shop.example", needs_reply=0, hours_ago=1):
+    when = format_datetime(datetime.now(timezone.utc) - timedelta(hours=hours_ago))
+    store.save_if_new(db, "yahoo", 1, uid, dict(message_id=f"<{uid}@x>", sender=sender,
+                                                  subject=f"s{uid}", date=when, snippet="b"))
+    db.execute("INSERT INTO claude_labels (account, uidvalidity, uid, label, needs_reply) "
+               "VALUES ('yahoo', 1, ?, ?, ?)", (uid, label, needs_reply))
+
+
+def test_only_recent_junk_that_needs_no_reply_moves(db):
+    save_labelled(db, 1, "promo")
+    save_labelled(db, 2, "newsletter")
+    save_labelled(db, 3, "spam")
+    save_labelled(db, 4, "job")                          # never
+    save_labelled(db, 5, "read")                         # not junk
+    save_labelled(db, 6, "fyi")                          # not junk (Sid's choice)
+    save_labelled(db, 7, "promo", needs_reply=1)         # needs a reply: never
+    save_labelled(db, 8, "promo", hours_ago=72)          # backlog: left alone
+    save_labelled(db, 9, "newsletter", sender="LinkedIn <jobs-noreply@linkedin.com>")  # job alert
+    save_labelled(db, 10, "promo")
+    db.execute("INSERT INTO moved (account, uidvalidity, uid) VALUES ('yahoo', 1, 10)")  # done
+    to_move, held = cleanup.pending(db)
+    assert sorted(r["uid"] for r in to_move) == [1, 2, 3]
+    assert [r["uid"] for r in held] == [9]
+
+
+def test_job_boards_are_recognised():
+    assert cleanup.is_job_board("Jobsdb <noreply@e.jobsdb.com>")
+    assert cleanup.is_job_board("LinkedIn <jobs-noreply@linkedin.com>")
+    assert cleanup.is_job_board("LinkedIn <messages-noreply@linkedin.com>")      # "X is hiring"
+    assert not cleanup.is_job_board("LinkedIn <updates-noreply@linkedin.com>")  # social
+    assert not cleanup.is_job_board("x <a@notjobsdb.com>")  # look-alike domain
+
+
+class FakeServer:
+    """Records what the code asks the server to do."""
+    def __init__(self, caps, fail_copy=False):
+        self.caps, self.fail_copy, self.calls = caps, fail_copy, []
+
+    def has_capability(self, cap):
+        return cap in self.caps
+
+    def __getattr__(self, name):
+        def record(*args, **kwargs):
+            if name == "copy" and self.fail_copy:
+                raise RuntimeError("copy failed")
+            self.calls.append((name, args))
+        return record
+
+
+def test_move_uses_move_when_the_server_has_it():
+    s = FakeServer({"MOVE", "UIDPLUS"})
+    cleanup.move(s, [5, 6])
+    assert s.calls == [("move", ([5, 6], "Assistant-Review"))]
+
+
+def test_icloud_style_move_only_removes_the_moved_emails():
+    s = FakeServer({"UIDPLUS"})
+    cleanup.move(s, [5, 6])
+    assert [c[0] for c in s.calls] == ["copy", "add_flags", "uid_expunge"]
+    assert s.calls[-1] == ("uid_expunge", ([5, 6],))       # only these UIDs
+    assert not any(c[0] == "expunge" for c in s.calls)     # never a plain EXPUNGE
+
+
+def test_failed_copy_removes_nothing():
+    s = FakeServer({"UIDPLUS"}, fail_copy=True)
+    with pytest.raises(RuntimeError):
+        cleanup.move(s, [5])
+    assert s.calls == []  # no \Deleted flag, no expunge
+
+
+def test_server_without_uid_expunge_is_refused():
+    s = FakeServer(set())
+    with pytest.raises(RuntimeError):
+        cleanup.move(s, [5])
+    assert s.calls == []
+
+
+def test_moves_are_capped_per_run(db, monkeypatch):
+    for uid in range(1, cleanup.MAX_MOVES + 6):
+        save_labelled(db, uid, "promo")
+    seen = []
+    monkeypatch.setattr(cleanup, "move_all", lambda db, rows: seen.append(len(rows)) or len(rows))
+    assert cleanup.run(db, live=True) == cleanup.MAX_MOVES
+    assert seen == [cleanup.MAX_MOVES]
+
+
+def test_cleanup_failure_never_stops_the_summary(db, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("server said no")
+    monkeypatch.setattr(digest, "fetch_new", lambda *a, **k: 0)
+    monkeypatch.setattr(digest, "classify_pending", lambda db: 0)
+    monkeypatch.setattr(digest.drafts, "make_drafts", lambda *a, **k: 0)
+    monkeypatch.setattr(digest.cleanup, "run", boom)
+    monkeypatch.setattr(digest.store, "open_db", lambda: db)
+    monkeypatch.setattr("sys.argv", ["digest"])
+    digest.main()
+    assert "Clean-up FAILED (summary unaffected)" in capsys.readouterr().out
+
+
+def test_summary_says_what_was_moved():
+    rows = [row(label="newsletter", moved=1), row(uid=2, label="newsletter", moved=1),
+            row(uid=3, label="promo", moved=1), row(uid=4, label="fyi")]
+    assert "Moved to Assistant-Review: 1 promo, 2 newsletter." in digest.build_text(rows)
+    assert "Moved to Assistant-Review" in digest.build_html(rows)

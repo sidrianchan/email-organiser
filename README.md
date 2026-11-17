@@ -1,8 +1,8 @@
 # Email Organiser
 
-A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know.
+A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-board alerts stay put.
 
-**It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only. The only things it ever writes are the summary (placed in my own inbox) and reply drafts (placed in Drafts). I read, edit and send each draft myself, or delete it. A test fails if any sending code (`smtplib`, SMTP) ever appears.
+**It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only. The only things it ever writes are the summary (placed in my own inbox) and reply drafts (placed in Drafts), and the only thing it changes is which folder junk sits in. I read, edit and send each draft myself, or delete it. A test fails if any sending code (`smtplib`, SMTP) ever appears.
 
 ```
 Mail summary Tue 08:00: 1 job, 1 to reply, 3 to read
@@ -46,6 +46,9 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
                                                   drafts ─▶ IMAP APPEND into each
                                                (claude -p,  account's Drafts folder
                                                 no tools)
+                                                     │
+                                                  cleanup ─▶ spam / promo / newsletter
+                                                             moved to Assistant-Review
                      launchd runs the whole chain at 08:00 and 18:00
 ```
 
@@ -54,6 +57,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `fetch.py` | Downloads the last day of mail without marking it read; remembers what it has seen |
 | `classify.py` | Sends emails to Claude in batches of 20; gets back a type, a needs-reply flag and a reason |
 | `drafts.py` | Writes reply drafts for emails that need one and places them in each account's Drafts folder |
+| `cleanup.py` | Moves recent spam, promos and newsletters to `Assistant-Review` (never job mail, anything needing a reply, or job-board alerts) |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
 | `label_by_hand.py`, `evaluate.py` | The blind hand-labelling tool and the accuracy report |
 | `store.py`, `paths.py` | The SQLite database, kept in `~/.email-organiser/`, outside the code |
@@ -63,7 +67,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 1. **Dry run by default.** Every command shows what it *would* do. `--live` is needed to change anything.
 2. **Read first, write last.** Milestones climb a risk ladder: read → label → summarise → drafts → moving mail.
 3. **No sending code exists.** "It sent something by mistake" is impossible, not just unlikely.
-4. **Nothing is ever deleted.** Junk will move to a review folder that I empty myself.
+4. **Nothing is ever deleted.** Junk moves to an `Assistant-Review` folder that I empty myself; dragging an email back undoes a move. At most 30 moves per run, so a bug can't empty an inbox.
 5. **The model labels; the code acts.** Claude only returns a label. Plain Python decides what happens. Claude runs with every tool and connector switched off, so a malicious email can at worst earn itself a wrong label (prompt injection has nothing to grab).
 6. **Secrets never sit in files.** App passwords live in the macOS Keychain. Personal data lives outside the repo.
 7. **Send the model as little as possible.** Sender, subject and the first 1,500 characters of the body.
@@ -77,6 +81,8 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **Duplicates beat losses.** Emails are only marked as summarised *after* the summary is delivered. A failed delivery means a repeat next time, never a silently lost email.
 - IMAP's `SINCE` search only understands dates, not times, so the code over-fetches and trims. Yahoo also rejects `HEADER` searches.
 - **Every provider is different.** The Drafts folder is `Draft` on Yahoo, `Drafts` on iCloud (found by name, because iCloud doesn't tag it) and `[Gmail]/Drafts` on Gmail. Yahoo returns an empty answer when asked for just two header fields (`HEADER.FIELDS`), so the first live test addressed a draft to the sender instead of the Reply-To address. The fix fetches the whole header. Yahoo also drops the `\Draft` flag on saved drafts; Mail.app still treats them as drafts because of the folder.
+- **iCloud can't MOVE.** Yahoo and Gmail support the IMAP `MOVE` command; iCloud doesn't. There, a move is copy → flag → `UID EXPUNGE` of exactly those emails. A plain `EXPUNGE` would also wipe anything else flagged as deleted, so the code refuses to run on a server without `UID EXPUNGE`.
+- **Sender lists are brittle.** LinkedIn sends job alerts from three different addresses; the dry run caught one I'd missed (a "… are hiring" email) before anything moved.
 
 ## Setup
 
@@ -122,7 +128,8 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 3 | Twice-daily summary, scheduled | ✓ |
 | 3.5 | Telegram ping after each summary (counts only) | ✓ |
 | 4 | Reply drafts in the Drafts folder (never sent) | ✓ |
-| 5 | Junk to a review folder; approved unsubscribes | next |
+| 5a | Junk to a review folder (job alerts kept) | ✓ |
+| 5b | Weekly unsubscribe from senders I tick | next |
 | 6 | Instant alert for recruiter and interview mail | |
 | 7 | Learns from my corrections, re-measured weekly | |
 
