@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS messages (
 # 5b:          unsub_headers  = each email's unsubscribe link, saved at fetch (you may delete the email)
 #              sender_choices = per sender: unsubscribed / by_hand / keep / just shown (NULL)
 #              nudges         = weeks the Telegram "senders to review" nudge went out
+# 6:           alerted        = emails the 15-minute check already pinged about
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -93,6 +94,11 @@ CREATE TABLE IF NOT EXISTS sender_choices (
 );
 CREATE TABLE IF NOT EXISTS nudges (
     week TEXT PRIMARY KEY, sent_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS alerted (
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    alerted_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
 );
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,

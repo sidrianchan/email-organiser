@@ -23,6 +23,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
 from . import cleanup, drafts, notify, paths, screener, store, unsubscribe
+from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
 from .mail import connect, load_accounts
@@ -291,9 +292,14 @@ def mark_done(db, rows: list) -> None:
 
 
 def main() -> None:
-    db, live = summarise()
-    if db is not None:
-        unsubscribe.weekly_nudge(db, live)   # never raises; after the ping
+    # Wait for a running 15-minute check to finish (up to 15 min), so the two never label or
+    # draft the same email. If it's somehow still running, go ahead: a late summary is worse.
+    with run_lock(wait_seconds=900) as got:
+        if not got:
+            print("quick check still running after 15 min: summarising anyway")
+        db, live = summarise()
+        if db is not None:
+            unsubscribe.weekly_nudge(db, live)   # never raises; after the ping
 
 
 def summarise():

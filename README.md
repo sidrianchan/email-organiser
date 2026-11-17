@@ -1,6 +1,6 @@
 # Email Organiser
 
-A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-alert emails are screened first: the jobs in them are rated against my profile, and the ones worth applying to head the summary. Once a week a Telegram nudge reminds me to pick junk senders to unsubscribe from; a command on the Mac does the standard one-click unsubscribe for the ones I tick.
+A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-alert emails are screened first: the jobs in them are rated against my profile, and the ones worth applying to head the summary. Every 15 minutes a quick check pings my phone (silently at night) when a job or needs-reply email arrives, with the reply draft already written. Once a week a Telegram nudge reminds me to pick junk senders to unsubscribe from; a command on the Mac does the standard one-click unsubscribe for the ones I tick.
 
 **It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only. The only things it ever writes are the summary (placed in my own inbox) and reply drafts (placed in Drafts), and the only thing it changes is which folder junk sits in. I read, edit and send each draft myself, or delete it. A test fails if any sending code (`smtplib`, SMTP) ever appears.
 
@@ -60,6 +60,8 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `screener.py` | Reads job-alert emails, has Claude list and rate every job against my profile, keeps the high-fit ones (links checked, duplicates and jobs I've applied to removed) |
 | `cleanup.py` | Moves recent spam, promos and newsletters to `Assistant-Review` (never job mail, anything needing a reply, or job-board alerts) |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
+| `watch.py` | The 15-minute check: new job or needs-reply mail → draft → instant counts-only ping. No new mail = no Claude call |
+| `runlock.py` | Makes sure the quick check and the summary never run at the same time |
 | `unsubscribe.py` | Lists junk senders, and for the ones I tick sends the RFC 8058 one-click unsubscribe (only when the sender's DKIM signature vouches for the link) |
 | `label_by_hand.py`, `evaluate.py` | The blind hand-labelling tool and the accuracy report |
 | `store.py`, `paths.py` | The SQLite database, kept in `~/.email-organiser/`, outside the code |
@@ -88,6 +90,8 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **Job alerts are mostly links.** A Jobsdb alert is ~14,700 characters, mostly tracking URLs. The screener swaps every link for a tag like `[L3]` before Claude reads it; Claude answers with tags and the code puts the real link back, only if it points at the site that sent the email. Claude can't invent or redirect a link.
 - **One sender address, two kinds of mail.** Jobsdb sends my application updates *and* its recommendations from the same address; Workday sends application status with an unsubscribe link too. So unsubscribe candidates are grouped by name *and* address, and any sender that ever sent job or needs-reply mail is never offered.
 - **Google doesn't follow the header format.** The standard wraps unsubscribe links in `<...>`; Google sends them bare. The first real dry run listed Google Health as "no unsubscribe header" until the parser accepted both.
+- **A sleeping Mac skips checks.** `launchd`'s `StartInterval` drops a check that falls due while the Mac is asleep (it says so in `man launchd.plist`), unlike the calendar schedule, which runs on wake. The quick check looks back 3 hours, and the summary 26, so nothing is lost.
+- **Retries can burn quota.** An email that keeps failing would be retried by a 15-minute job 96 times a day. The quick check only labels the last 3 hours and only drafts what it's alerting about; the twice-daily summary retries the rest.
 - **Sender lists are brittle.** LinkedIn sends job alerts from three different addresses; the dry run caught one I'd missed (a "… are hiring" email) before anything moved.
 
 ## Setup
@@ -141,7 +145,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 5a | Junk to a review folder (job alerts kept) | ✓ |
 | 5c | Job-alert screener: jobs worth applying to, in the summary | ✓ |
 | 5b | Weekly unsubscribe from senders I tick | ✓ |
-| 6 | Instant alert for recruiter and interview mail | |
+| 6 | Instant alert for recruiter and interview mail (every 15 min) | ✓ |
 | 7 | Learns from my corrections, re-measured weekly | |
 
 ## How this was built

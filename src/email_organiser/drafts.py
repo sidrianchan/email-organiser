@@ -69,7 +69,7 @@ SCHEMA = {
 }
 
 
-def pending(db, sample: bool = False) -> list:
+def pending(db, sample: bool = False, only: set | None = None) -> list:
     """Emails that need a reply draft: Claude said needs_reply, not junk, recent, not drafted yet."""
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.message_id, m.sender, m.subject,
@@ -81,7 +81,10 @@ def pending(db, sample: bool = False) -> list:
     """, (sample,)).fetchall()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
     # The model labels; the code acts (design rule 4): junk never gets a draft.
-    return [r for r in rows if r["label"] not in NO_DRAFT and (sample or arrived(r) >= cutoff)]
+    rows = [r for r in rows if r["label"] not in NO_DRAFT and (sample or arrived(r) >= cutoff)]
+    if only is not None:   # the 15-minute check drafts only the emails it is alerting about
+        rows = [r for r in rows if (r["account"], r["uidvalidity"], r["uid"]) in only]
+    return rows
 
 
 def write_replies(rows: list) -> dict[tuple, str]:
@@ -190,9 +193,9 @@ def save_drafts(db, rows: list, bodies: dict) -> int:
     return saved
 
 
-def make_drafts(db, live: bool, sample: bool = False) -> int:
+def make_drafts(db, live: bool, sample: bool = False, only: set | None = None) -> int:
     """The whole step. Returns how many drafts were saved (0 on a dry run)."""
-    rows = pending(db, sample)
+    rows = pending(db, sample, only)
     print(f"{len(rows)} emails need a reply draft")
     if not rows:
         return 0

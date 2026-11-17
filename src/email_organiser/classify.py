@@ -89,15 +89,20 @@ def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
     return {item["id"]: item for item in answer["labels"]}, model
 
 
-def classify_pending(db) -> int:
-    """Label every email Claude hasn't labelled yet. Returns how many were labelled."""
-    # Every email we've seen that Claude hasn't labelled yet.
+def classify_pending(db, since_hours: int | None = None) -> int:
+    """Label every email Claude hasn't labelled yet. Returns how many were labelled.
+    since_hours: only mail first seen that recently (the 15-minute check uses this, so an
+    email that keeps failing isn't retried 96 times a day; the summary run retries the rest)."""
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.snippet
         FROM messages m
         LEFT JOIN claude_labels c USING (account, uidvalidity, uid)
         WHERE c.label IS NULL
-    """).fetchall()
+          AND (? IS NULL OR m.first_seen >= datetime('now', '-' || ? || ' hours'))
+    """, (since_hours, since_hours)).fetchall()
+    if not rows:
+        print("0 emails to label")
+        return 0   # nothing new: no Claude call at all
     print(f"{len(rows)} emails to label, {BATCH_SIZE} per call")
 
     done = 0

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd = macOS's built-in scheduler. This tells it: "every 15 minutes, run the
+  quick check with --live, from the stable copy of the code". A check due while the
+  Mac is asleep is skipped (man launchd.plist); the next one looks back 3 hours, so
+  nothing is lost. A check still running when the next is due is not doubled.
+  Don't edit the __PLACEHOLDERS__: scripts/install-schedule.sh fills them in.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.email-organiser.watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV__</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>email_organiser.watch</string>
+        <string>--live</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__CODE_DIR__</string>
+
+    <!-- launchd starts with an almost empty PATH; this lets the script find `claude`. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>StandardOutPath</key>
+    <string>__LOG__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG__</string>
+</dict>
+</plist>
