@@ -185,8 +185,9 @@ def save_drafts(db, rows: list, bodies: dict) -> int:
                 client.append(folder, msg.as_bytes(), flags=(DRAFT, SEEN),
                               msg_time=datetime.now(timezone.utc))
                 db.execute("INSERT OR IGNORE INTO drafts (account, uidvalidity, uid, folder, "
-                           "draft_message_id) VALUES (?, ?, ?, ?, ?)",
-                           (name, r["uidvalidity"], r["uid"], folder, msg["Message-ID"]))
+                           "draft_message_id, body) VALUES (?, ?, ?, ?, ?, ?)",
+                           (name, r["uidvalidity"], r["uid"], folder, msg["Message-ID"],
+                            bodies[(name, r["uidvalidity"], r["uid"])]))
                 db.commit()  # straight after each one: a crash can't cause a second draft
                 saved += 1
                 print(f"  [{name}] draft saved to {folder}: {msg['Subject']}")

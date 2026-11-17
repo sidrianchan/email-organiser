@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS messages (
 #              sender_choices = per sender: unsubscribed / by_hand / keep / just shown (NULL)
 #              nudges         = weeks the Telegram "senders to review" nudge went out
 # 6:           alerted        = emails the 15-minute check already pinged about
+# 7:           corrections    = what you corrected (rescued / marked_junk / replied_unflagged)
+#              sender_rules   = never_move (after 1 rescue) / junk (after 3 junk corrections)
+#              sent_replies   = what you sent in reply to a drafted email (style, later)
+#              scores         = the weekly labelling check
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -100,6 +104,26 @@ CREATE TABLE IF NOT EXISTS alerted (
     alerted_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (account, uidvalidity, uid)
 );
+CREATE TABLE IF NOT EXISTS corrections (
+    account TEXT, uidvalidity INTEGER, uid INTEGER, kind TEXT,
+    label_was TEXT, truth TEXT, found_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid, kind)
+);
+CREATE TABLE IF NOT EXISTS sender_rules (
+    address TEXT PRIMARY KEY, rule TEXT NOT NULL, label TEXT, reason TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sent_replies (
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    draft_body TEXT, sent_body TEXT, similarity REAL,
+    found_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS scores (
+    week TEXT PRIMARY KEY, total INTEGER, correct INTEGER, job_total INTEGER, job_correct INTEGER,
+    reply_correct INTEGER, corr_total INTEGER, corr_correct INTEGER, model TEXT, prompt_hash TEXT,
+    line TEXT, shown INTEGER DEFAULT 0, scored_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     label TEXT NOT NULL,
@@ -120,6 +144,7 @@ def open_db() -> sqlite3.Connection:
     _add_column_if_missing(db, "my_labels", "needs_reply", "INTEGER")
     _add_column_if_missing(db, "claude_labels", "job_alert", "INTEGER")
     _add_column_if_missing(db, "jobs", "commission", "INTEGER")
+    _add_column_if_missing(db, "drafts", "body", "TEXT")   # milestone 7: compare with what you sent
     return db
 
 
@@ -161,6 +186,22 @@ def save_unsub(db: sqlite3.Connection, account: str, uidvalidity: int, uid: int,
                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                (account, uidvalidity, uid, info.get("url"), info.get("mailto"),
                 info.get("one_click", 0), info.get("signed", 0), missing))
+
+
+def sender_address(sender: str) -> str:
+    from email.utils import parseaddr
+    return parseaddr(sender or "")[1].lower()
+
+
+def never_move(db: sqlite3.Connection) -> set[str]:
+    """Senders you rescued from Assistant-Review: never moved again (milestone 7)."""
+    return {r[0] for r in db.execute("SELECT address FROM sender_rules WHERE rule = 'never_move'")}
+
+
+def junk_rules(db: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+    """{address: (label, reason)} for senders labelled junk without asking Claude (milestone 7)."""
+    return {r[0]: (r[1], r[2]) for r in
+            db.execute("SELECT address, label, reason FROM sender_rules WHERE rule = 'junk'")}
 
 
 def arrived(row) -> datetime:

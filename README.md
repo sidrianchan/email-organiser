@@ -1,6 +1,6 @@
 # Email Organiser
 
-A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-alert emails are screened first: the jobs in them are rated against my profile, and the ones worth applying to head the summary. Every 15 minutes a quick check pings my phone (silently at night) when a job or needs-reply email arrives, with the reply draft already written. Once a week a Telegram nudge reminds me to pick junk senders to unsubscribe from; a command on the Mac does the standard one-click unsubscribe for the ones I tick.
+A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know. Spam, promos and newsletters move out of the inbox into an `Assistant-Review` folder. Job-alert emails are screened first: the jobs in them are rated against my profile, and the ones worth applying to head the summary. Every 15 minutes a quick check pings my phone (silently at night) when a job or needs-reply email arrives, with the reply draft already written. It also learns from what I do: an email I drag back out of Review means that sender is never moved again, and once a week Claude re-labels my hand-labelled test set so the accuracy is measured, not assumed. Once a week a Telegram nudge reminds me to pick junk senders to unsubscribe from; a command on the Mac does the standard one-click unsubscribe for the ones I tick.
 
 **It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only. The only things it ever writes are the summary (placed in my own inbox) and reply drafts (placed in Drafts), and the only thing it changes is which folder junk sits in. I read, edit and send each draft myself, or delete it. A test fails if any sending code (`smtplib`, SMTP) ever appears.
 
@@ -62,6 +62,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
 | `watch.py` | The 15-minute check: new job or needs-reply mail → draft → instant counts-only ping. No new mail = no Claude call |
 | `runlock.py` | Makes sure the quick check and the summary never run at the same time |
+| `learn.py` | Notices my corrections (rescued from Review, moved to junk, replied when Claude said no reply), turns them into sender rules, and runs the weekly accuracy check |
 | `unsubscribe.py` | Lists junk senders, and for the ones I tick sends the RFC 8058 one-click unsubscribe (only when the sender's DKIM signature vouches for the link) |
 | `label_by_hand.py`, `evaluate.py` | The blind hand-labelling tool and the accuracy report |
 | `store.py`, `paths.py` | The SQLite database, kept in `~/.email-organiser/`, outside the code |
@@ -77,6 +78,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 7. **Send the model as little as possible.** Sender, subject and the first 1,500 characters of the body.
 8. **Drafts never decide for me.** A draft never accepts, declines or promises anything; those become [gaps] I fill. Plain text only, no links. Junk (spam, promo, newsletter) never gets a draft, whatever the model says.
 9. **Unsubscribing needs my typed yes, and only uses the vouched-for link.** One-click (an HTTPS POST of `List-Unsubscribe=One-Click`) only when my mail provider verified a DKIM signature covering both unsubscribe headers. No cookies, no login, redirects not followed. Spam is never offered: unsubscribing tells a spammer the address is live.
+10. **Learning changes what the system knows, never what it may do.** Corrections become sender rules and test cases; the learning code only opens folders read-only. Asymmetric thresholds: one rescue protects a sender for good (being wrong leaves junk in the inbox); labelling a sender junk without Claude takes three corrections (being wrong hides real mail). A change is kept only if the weekly score doesn't drop, and the job score never.
 
 ## Things I found along the way
 
@@ -92,6 +94,8 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **Google doesn't follow the header format.** The standard wraps unsubscribe links in `<...>`; Google sends them bare. The first real dry run listed Google Health as "no unsubscribe header" until the parser accepted both.
 - **A sleeping Mac skips checks.** `launchd`'s `StartInterval` drops a check that falls due while the Mac is asleep (it says so in `man launchd.plist`), unlike the calendar schedule, which runs on wake. The quick check looks back 3 hours, and the summary 26, so nothing is lost.
 - **Retries can burn quota.** An email that keeps failing would be retried by a 15-minute job 96 times a day. The quick check only labels the last 3 hours and only drafts what it's alerting about; the twice-daily summary retries the rest.
+- **The first real correction found itself.** On its first look at my Sent folders, the learning step found I'd replied to a game-prize email Claude had marked "no reply needed".
+- **Measured, not assumed.** The automated weekly check re-labelled my 50 hand-labelled emails and got 44/50 (88%), the same as the hand-scored test two days earlier. Job emails 6/6.
 - **Sender lists are brittle.** LinkedIn sends job alerts from three different addresses; the dry run caught one I'd missed (a "… are hiring" email) before anything moved.
 
 ## Setup
@@ -146,7 +150,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 5c | Job-alert screener: jobs worth applying to, in the summary | ✓ |
 | 5b | Weekly unsubscribe from senders I tick | ✓ |
 | 6 | Instant alert for recruiter and interview mail (every 15 min) | ✓ |
-| 7 | Learns from my corrections, re-measured weekly | |
+| 7 | Learns from my corrections, re-measured weekly (prompt examples and reply style once ~10 corrections exist) | ✓ |
 
 ## How this was built
 

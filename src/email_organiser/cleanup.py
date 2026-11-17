@@ -67,6 +67,9 @@ def pending(db) -> tuple[list, list]:
     recent = [r for r in rows if arrived(r) >= cutoff]
     def waiting(r) -> bool:
         return bool(r["job_alert"] or is_job_board(r["sender"])) and not r["screened"]
+    # Milestone 7: a sender you rescued from Review is never moved again.
+    keep = store.never_move(db)
+    recent = [r for r in recent if store.sender_address(r["sender"]) not in keep]
     held = [r for r in recent if waiting(r)]
     return [r for r in recent if not waiting(r)], held
 

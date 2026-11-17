@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import cleanup, drafts, notify, paths, screener, store, unsubscribe
+from . import cleanup, drafts, learn, notify, paths, screener, store, unsubscribe
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -143,7 +143,7 @@ def job_line(j) -> str:
     return ", ".join(x for x in (j["title"], j["company"], j["location"], closing) if x)
 
 
-def build_text(rows: list, jobs: list = ()) -> str:
+def build_text(rows: list, jobs: list = (), notes: list = ()) -> str:
     """Plain-text version, for mail apps that don't show HTML."""
     g = sections(rows)
     out = [f"{len(rows)} new emails since the last summary", ""]
@@ -172,11 +172,12 @@ def build_text(rows: list, jobs: list = ()) -> str:
         out.append(f"Everything else: {routine}.")
     if moved_line(rows):
         out.append(moved_line(rows))
+    out += list(notes)   # e.g. the weekly labelling check (milestone 7)
     out.append("\nLabelled by Claude. Nothing was deleted or sent.")
     return "\n".join(out)
 
 
-def build_html(rows: list, jobs: list = ()) -> str:
+def build_html(rows: list, jobs: list = (), notes: list = ()) -> str:
     """The nicer version. Styles are inline because many mail apps strip <style> blocks.
 
     Every piece of email text goes through html.escape(): a sender could put HTML
@@ -255,6 +256,7 @@ def build_html(rows: list, jobs: list = ()) -> str:
     footer = (f'<div style="margin-top:22px;padding:12px 14px;border-radius:8px;background:#f6f7f9;'
               f'font-size:13px;color:#4b5563">Everything else: {routine or "none"}'
               + (f'<div style="margin-top:4px">{e(moved_line(rows))}</div>' if moved_line(rows) else "")
+              + "".join(f'<div style="margin-top:4px">{e(n)}</div>' for n in notes)
               + '</div>')
     stamp = datetime.now().strftime("%a %d %b &middot; %H:%M")
 
@@ -317,6 +319,7 @@ def summarise():
         db.execute("CREATE TEMP TABLE digested AS SELECT * FROM main.digested WHERE 0")  # pretend nothing was summarised
     else:
         fetch_new(db, LOOKBACK_HOURS, show=False)
+        learn.step(db, live=args.live)   # corrections -> rules BEFORE labelling and moving; never raises
         classify_pending(db)
         try:
             screener.run(db, live=args.live)
@@ -343,7 +346,8 @@ def summarise():
         return (None if args.sample else db), args.live
 
     subject = subject_line(sections(recent), len(recent), jobs)
-    text, html_body = build_text(recent, jobs), build_html(recent, jobs)
+    notes = learn.unshown_lines(db)
+    text, html_body = build_text(recent, jobs, notes), build_html(recent, jobs, notes)
     print(f"\nSubject: {subject}\n\n{text}\n")
 
     preview = paths.PREVIEW
@@ -353,6 +357,7 @@ def summarise():
         if not args.sample:
             mark_done(db, recent + too_old)  # only after delivery worked
             screener.mark_shown(db, jobs)
+            learn.mark_shown(db)
         print(f"Delivered to your {DELIVER_TO} inbox.")
         notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO)  # after delivery; can't undo it
     else:

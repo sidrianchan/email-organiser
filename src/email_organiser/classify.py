@@ -100,9 +100,22 @@ def classify_pending(db, since_hours: int | None = None) -> int:
         WHERE c.label IS NULL
           AND (? IS NULL OR m.first_seen >= datetime('now', '-' || ? || ' hours'))
     """, (since_hours, since_hours)).fetchall()
+    # Milestone 7: senders you marked as junk 3+ times are labelled by rule, without Claude.
+    rules = store.junk_rules(db)
+    by_rule = [r for r in rows if store.sender_address(r["sender"]) in rules]
+    for r in by_rule:
+        label, reason = rules[store.sender_address(r["sender"])]
+        db.execute("INSERT OR REPLACE INTO claude_labels "
+                   "(account, uidvalidity, uid, label, needs_reply, job_alert, reason, model) "
+                   "VALUES (?, ?, ?, ?, 0, 0, ?, 'sender rule')",
+                   (r["account"], r["uidvalidity"], r["uid"], label, f"sender rule: {reason}"))
+    if by_rule:
+        db.commit()
+        print(f"{len(by_rule)} labelled by sender rule (no Claude call)")
+    rows = [r for r in rows if store.sender_address(r["sender"]) not in rules]
     if not rows:
         print("0 emails to label")
-        return 0   # nothing new: no Claude call at all
+        return len(by_rule)   # nothing new: no Claude call at all
     print(f"{len(rows)} emails to label, {BATCH_SIZE} per call")
 
     done = 0
@@ -133,7 +146,7 @@ def classify_pending(db, since_hours: int | None = None) -> int:
         print(f"  batch {start // BATCH_SIZE + 1}: labelled {done} so far ({model})")
 
     print(f"Done: {done} labelled, {len(rows) - done} left for next run")
-    return done
+    return done + len(by_rule)
 
 
 def main() -> None:

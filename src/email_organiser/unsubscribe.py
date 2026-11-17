@@ -144,11 +144,12 @@ def groups(db) -> list[dict]:
     """).fetchall()
     # Addresses that also send you job mail, or mail you need to answer (under any name).
     important = {sender_key(r["sender"])[0] for r in rows if r["label"] == "job" or r["needs_reply"]}
+    rescued = store.never_move(db)   # you dragged its mail back out of Review: you want it
     out: dict[tuple, dict] = {}
     for r in rows:
         address, name = sender_key(r["sender"])
-        if is_example(address):
-            continue   # planted test emails: example.com etc. are reserved, never real senders
+        if is_example(address) or address in rescued:
+            continue   # planted test emails (example.com is reserved), or a sender you rescued
         g = out.setdefault((address, name), dict(
             address=address, name=name, key=f"{address}|{name}", count=0, accounts=set(),
             last_seen="", url=None, mailto=None, unsigned=False, unknown=0, offer=True,
