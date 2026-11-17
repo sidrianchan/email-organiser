@@ -88,3 +88,42 @@ def test_job_emails_are_never_grouped():
 def test_subject_line_when_nothing_matters():
     rows = [row(label="fyi"), row(uid=2, label="promo")]
     assert "nothing needs you (2 routine)" in digest.subject_line(digest.sections(rows), 2)
+
+
+# --- Telegram ping ----------------------------------------------------------------
+
+from email_organiser import notify
+
+
+def test_ping_carries_counts_but_no_email_content():
+    rows = [row(subject="Offer from Acme", label="job", needs_reply=1),
+            row(uid=2, subject="Secret thing", sender="Bob <bob@x.example>", needs_reply=1, label="fyi"),
+            row(uid=3, label="newsletter")]
+    text, loud = notify.message(digest.ping_counts(rows), len(rows), "yahoo")
+    assert "1 job, 1 to reply" in text and loud
+    for private in ("Offer", "Acme", "Secret", "Bob", "bob@"):
+        assert private not in text
+
+
+def test_routine_and_empty_runs_ping_without_sound():
+    text, loud = notify.message({"job": 0, "reply": 0, "read": 0}, 4, "yahoo")
+    assert "nothing needs you (4 routine)" in text and not loud
+    text, loud = notify.message({"job": 0, "reply": 0, "read": 0}, 0, "yahoo")
+    assert "no new email" in text and not loud
+    _, loud = notify.message({"job": 0, "reply": 0, "read": 3}, 3, "yahoo")
+    assert not loud  # "worth reading" alone isn't worth a sound
+
+
+def test_ping_failure_never_breaks_the_summary(monkeypatch, tmp_path):
+    monkeypatch.setattr(notify.paths, "TELEGRAM_CHAT", tmp_path / "missing")
+    monkeypatch.setattr(notify.keyring, "get_password", lambda *a: None)
+    assert notify.ping({"job": 1, "reply": 0, "read": 0}, 1, "yahoo") is False  # no exception
+
+
+def test_errors_never_show_the_token(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("failed for https://api.telegram.org/botSECRET123/sendMessage")
+    monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
+    with pytest.raises(RuntimeError) as e:
+        notify.call("SECRET123", "sendMessage", {})
+    assert "SECRET123" not in str(e.value)

@@ -5,6 +5,7 @@
         mail.db         the database: seen emails, labels, summaries
         logs/           what each scheduled run printed
         preview.html    the last summary preview
+        telegram_chat   which Telegram chat gets the ping (the bot token is in Keychain)
 
 Keeping personal data away from the code means:
   * the code can be public on GitHub with nothing personal anywhere near it, and
@@ -20,3 +21,4 @@ ACCOUNTS = HOME / "accounts.toml"
 DB = HOME / "mail.db"
 LOGS = HOME / "logs"
 PREVIEW = HOME / "preview.html"
+TELEGRAM_CHAT = HOME / "telegram_chat"

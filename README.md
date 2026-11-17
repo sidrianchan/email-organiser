@@ -92,7 +92,15 @@ uv run python -m email_organiser.digest --sample   # preview the HTML in a brows
 
 # 5. Schedule it (08:00 and 18:00) on a stable copy of the code
 scripts/install-schedule.sh
+
+# 6. Optional: a Telegram ping after each summary. Create a bot with @BotFather,
+#    send it "hi", then (token goes to the Keychain via a hidden prompt):
+uv run python -m email_organiser.notify setup
 ```
+
+The Telegram ping carries counts only ("1 job, 2 to read"), never senders or subjects,
+because bot chats are not end-to-end encrypted. It is sent every run, even with no new
+mail, so a missing ping means the schedule broke. If Telegram fails, the summary is unaffected.
 
 Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 
@@ -104,6 +112,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 1 | Read new mail, read-only, without repeats | ✓ |
 | 2 | Claude labels mail; blind 50-email test set | ✓ |
 | 3 | Twice-daily summary, scheduled | ✓ |
+| 3.5 | Telegram ping after each summary (counts only) | ✓ |
 | 4 | Reply drafts in the Drafts folder (never sent) | next |
 | 5 | Junk to a review folder; approved unsubscribes | |
 | 6 | Instant alert for recruiter and interview mail | |

@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr, parsedate_to_datetime
 
-from . import paths, store
+from . import notify, paths, store
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
 from .mail import connect, load_accounts
@@ -64,6 +64,12 @@ def sections(rows: list) -> dict:
         "read": [r for r in rows if r["label"] == "read" and not r["needs_reply"]],
         "counts": {name: sum(r["label"] == name for r in rows) for name in ROUTINE},
     }
+
+
+def ping_counts(rows: list) -> dict:
+    """Just the numbers for the Telegram ping: no subjects or senders leave the Mac."""
+    g = sections(rows)
+    return {k: len(g[k]) for k in ("job", "reply", "read")}
 
 
 def collapse(rows: list) -> tuple[list, list]:
@@ -250,6 +256,7 @@ def main() -> None:
         print("No new emails: no summary this time.")
         if args.live and not args.sample:
             mark_done(db, too_old)
+            notify.ping(ping_counts(recent), 0, DELIVER_TO)  # still ping: silence would mean "broken"
         return
 
     subject = subject_line(sections(recent), len(recent))
@@ -263,8 +270,11 @@ def main() -> None:
         if not args.sample:
             mark_done(db, recent + too_old)  # only after delivery worked
         print(f"Delivered to your {DELIVER_TO} inbox.")
+        notify.ping(ping_counts(recent), len(recent), DELIVER_TO)  # after delivery; can't undo it
     else:
         print(f"(dry run: nothing delivered. HTML preview: {preview})")
+        text, loud = notify.message(ping_counts(recent), len(recent), DELIVER_TO)
+        print(f"(dry run: Telegram ping not sent; it would say: {text}{'' if loud else '  [no sound]'})")
         if args.sample:
             subprocess.run(["open", str(preview)])  # show it in your browser
 
