@@ -1,6 +1,7 @@
 """Milestone 3: the twice-daily summary.
 
-One run = fetch new mail -> Claude labels it -> build a summary -> put it in your inbox.
+One run = fetch new mail -> Claude labels it -> reply drafts (milestone 4)
+          -> build a summary -> put it in your inbox -> Telegram ping.
 
 Dry run by default (design rule 0): prints the summary and changes nothing.
     python3 -m uv run python -m email_organiser.digest
@@ -18,12 +19,13 @@ import html
 import subprocess
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from email.utils import formatdate, make_msgid, parseaddr, parsedate_to_datetime
+from email.utils import formatdate, make_msgid, parseaddr
 
-from . import notify, paths, store
+from . import drafts, notify, paths, store
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
 from .mail import connect, load_accounts
+from .store import arrived
 
 DELIVER_TO = "yahoo"   # which account's inbox gets the summary
 LOOKBACK_HOURS = 26    # each run looks back a bit over 12h x 2, so a late or missed run loses nothing
@@ -32,22 +34,15 @@ ROUTINE = ["fyi", "newsletter", "promo", "spam"]
 GROUP_AT = 3           # in "worth reading", 3+ emails from one sender collapse into one line
 
 
-def arrived(row) -> datetime:
-    """When the email was sent, from its Date header; first-seen time if that's unreadable."""
-    try:
-        return parsedate_to_datetime(row["date"]).astimezone(timezone.utc)
-    except (TypeError, ValueError):
-        return datetime.fromisoformat(row["first_seen"]).replace(tzinfo=timezone.utc)
-
-
 def pending(db) -> tuple[list, list]:
     """(recent, too_old): labelled emails that haven't been in a summary yet."""
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.date, m.first_seen,
-               c.label, c.needs_reply, c.reason
+               c.label, c.needs_reply, c.reason, dr.uid IS NOT NULL AS drafted
         FROM messages m
         JOIN claude_labels c USING (account, uidvalidity, uid)
         LEFT JOIN digested d USING (account, uidvalidity, uid)
+        LEFT JOIN drafts dr USING (account, uidvalidity, uid)
         WHERE d.uid IS NULL
     """).fetchall()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
@@ -93,6 +88,11 @@ def group_subjects(rs: list, limit: int = 4) -> str:
     return " / ".join(seen[:limit]) + more
 
 
+def has_draft(r) -> bool:
+    """True if milestone 4 put a reply draft in Drafts for this email."""
+    return "drafted" in r.keys() and bool(r["drafted"])  # works for database rows and test dicts
+
+
 def sender_name(r) -> str:
     return parseaddr(r["sender"])[0] or parseaddr(r["sender"])[1]  # "Jobsdb <x@y>" -> "Jobsdb"
 
@@ -129,6 +129,7 @@ def build_text(rows: list) -> str:
             singles, groups = collapse(g[key]) if key == "read" else (g[key], [])
             for r in singles:
                 tag = "  [needs reply]" if r["needs_reply"] and key == "job" else ""
+                tag += "  [draft in Drafts]" if has_draft(r) else ""
                 out += [f"* {r['subject']}{tag}",
                         f"  {sender_name(r)} | {r['account']} | {when(r)}",
                         f"  {r['reason']}", ""]
@@ -175,6 +176,9 @@ def build_html(rows: list) -> str:
             if r["needs_reply"] and key == "job":
                 badge = (' <span style="padding:1px 7px;border-radius:9px;background:#d977061a;'
                          'color:#d97706;font-size:11px;font-weight:600">needs reply</span>')
+            if has_draft(r):
+                badge += (' <span style="padding:1px 7px;border-radius:9px;background:#7c3aed1a;'
+                          'color:#7c3aed;font-size:11px;font-weight:600">draft ready</span>')
             body.append(
                 '<div style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
                 f'<div style="font-size:15px;font-weight:600;color:#111827;line-height:1.35">'
@@ -248,6 +252,10 @@ def main() -> None:
     else:
         fetch_new(db, LOOKBACK_HOURS, show=False)
         classify_pending(db)
+        try:
+            drafts.make_drafts(db, live=args.live)
+        except Exception as e:  # a drafting problem must never stop the summary
+            print(f"Drafts FAILED (summary unaffected): {e}")
 
     recent, too_old = pending(db)
     if too_old and not args.sample:

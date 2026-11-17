@@ -4,6 +4,9 @@ SQLite = a whole database in one file (~/.email-organiser/mail.db, see paths.py)
 No server to install, and it lives outside the code folder, so it never reaches GitHub.
 """
 import sqlite3
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+
 from . import paths
 
 DB_PATH = paths.DB
@@ -32,6 +35,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 
 # Milestone 3: digested = emails already shown in a summary, so none appears twice.
+# Milestone 4: drafts    = emails that already have a reply draft, so none gets two.
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -46,6 +50,12 @@ CREATE TABLE IF NOT EXISTS claude_labels (
 CREATE TABLE IF NOT EXISTS digested (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     digest_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS drafts (
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    folder TEXT, draft_message_id TEXT,
+    drafted_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (account, uidvalidity, uid)
 );
 CREATE TABLE IF NOT EXISTS my_labels (
@@ -95,3 +105,11 @@ def save_if_new(db: sqlite3.Connection, account: str, uidvalidity: int,
     )
     # rowcount = how many rows that statement changed: 1 = new, 0 = seen before.
     return cur.rowcount == 1
+
+
+def arrived(row) -> datetime:
+    """When the email was sent, from its Date header; first-seen time if that's unreadable."""
+    try:
+        return parsedate_to_datetime(row["date"]).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.fromisoformat(row["first_seen"]).replace(tzinfo=timezone.utc)

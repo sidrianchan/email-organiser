@@ -127,3 +127,102 @@ def test_errors_never_show_the_token(monkeypatch):
     with pytest.raises(RuntimeError) as e:
         notify.call("SECRET123", "sendMessage", {})
     assert "SECRET123" not in str(e.value)
+
+
+# --- milestone 4: reply drafts --------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from pathlib import Path
+
+from email_organiser import drafts
+
+
+def reply_row(**over) -> dict:
+    return row(message_id="<orig@acme.example>", snippet="Are you free next week?",
+               needs_reply=1, label="job") | over
+
+
+def test_draft_is_threaded_under_the_original():
+    msg = drafts.build_draft("me@example.com", reply_row(),
+                             {"reply_to": "", "references": "<a@x> <b@x>"}, "Hi\n\nSidrian")
+    assert msg["To"] == "Acme <hr@acme.example>"
+    assert msg["Subject"] == "Re: Your application"
+    assert msg["In-Reply-To"] == "<orig@acme.example>"
+    assert msg["References"] == "<a@x> <b@x> <orig@acme.example>"
+    assert msg.get_content_type() == "text/plain"  # plain text only: nothing can run
+
+
+def test_draft_goes_to_reply_to_and_re_is_not_doubled():
+    msg = drafts.build_draft("me@example.com", reply_row(subject="RE: Interview"),
+                             {"reply_to": "Jobs <jobs@acme.example>", "references": ""}, "x")
+    assert msg["To"] == "Jobs <jobs@acme.example>"
+    assert msg["Subject"] == "RE: Interview"
+    assert msg["References"] == "<orig@acme.example>"
+
+
+def test_reply_to_and_references_are_read_from_the_full_header():
+    raw = (b"From: a@x.example\r\nReply-To: Jobs <jobs@x.example>\r\n"
+           b"References: <old@x>\r\nSubject: s\r\n\r\n")
+
+    class FakeClient:
+        def fetch(self, uids, parts):
+            assert parts == ["BODY.PEEK[HEADER]"]  # PEEK: never marks the email read
+            return {7: {b"SEQ": 1, b"BODY[HEADER]": raw}}
+
+    assert drafts.original_headers(FakeClient(), 7) == {
+        "reply_to": "Jobs <jobs@x.example>", "references": "<old@x>"}
+    assert drafts.original_headers(FakeClient(), 8) is None  # email gone: no draft
+
+
+def test_line_breaks_in_subject_cannot_add_headers():
+    msg = drafts.build_draft("me@example.com", reply_row(subject="Hi\r\nBcc: evil@x.example"),
+                             {"reply_to": "", "references": ""}, "x")
+    assert msg["Bcc"] is None
+    assert "\n" not in msg["Subject"]
+
+
+def save_reply_email(db, uid, label, hours_ago=1):
+    when = format_datetime(datetime.now(timezone.utc) - timedelta(hours=hours_ago))
+    store.save_if_new(db, "yahoo", 1, uid, dict(message_id=f"<{uid}@x>", sender="a@x.example",
+                                                  subject="s", date=when, snippet="b"))
+    db.execute("INSERT INTO claude_labels (account, uidvalidity, uid, label, needs_reply) "
+               "VALUES ('yahoo', 1, ?, ?, 1)", (uid, label))
+
+
+def test_junk_old_and_already_drafted_mail_gets_no_draft(db):
+    save_reply_email(db, 1, "job")
+    save_reply_email(db, 2, "spam")             # Claude said "needs reply" but it's junk
+    save_reply_email(db, 3, "promo")
+    save_reply_email(db, 4, "read", hours_ago=72)  # too old
+    save_reply_email(db, 5, "read")
+    db.execute("INSERT INTO drafts (account, uidvalidity, uid) VALUES ('yahoo', 1, 5)")
+    assert [r["uid"] for r in drafts.pending(db)] == [1]
+
+
+def test_drafting_failure_never_stops_the_summary(db, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("claude is down")
+    monkeypatch.setattr(digest, "fetch_new", lambda *a, **k: 0)
+    monkeypatch.setattr(digest, "classify_pending", lambda db: 0)
+    monkeypatch.setattr(digest.drafts, "make_drafts", boom)
+    monkeypatch.setattr(digest.store, "open_db", lambda: db)
+    monkeypatch.setattr("sys.argv", ["digest"])
+    digest.main()  # dry run; must not raise
+    assert "Drafts FAILED (summary unaffected)" in capsys.readouterr().out
+
+
+def test_summary_shows_draft_ready():
+    rows = [row(needs_reply=1, label="fyi", drafted=1)]
+    assert "draft ready" in digest.build_html(rows)
+    assert "[draft in Drafts]" in digest.build_text(rows)
+
+
+def test_no_sending_code_exists():
+    """Design rule 2, enforced: the project contains no way to send email."""
+    src = Path(__file__).parent.parent / "src"
+    forbidden = ("smtplib", "SMTP(", "sendmail", "send_message")
+    for f in src.rglob("*.py"):
+        text = f.read_text()
+        for word in forbidden:
+            assert word not in text, f"{word} found in {f.name}"

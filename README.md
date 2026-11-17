@@ -1,8 +1,8 @@
 # Email Organiser
 
-A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted.
+A personal AI email assistant. It reads my three mailboxes (Yahoo, iCloud, Gmail), has Claude label every new email, and puts a short summary in my inbox at 08:00 and 18:00: job emails first, then what needs a reply, then what's worth reading. The rest is just counted. For emails that need a reply, Claude writes a draft and leaves it in that account's Drafts folder, threaded under the original, with [gaps] for anything only I know.
 
-**It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only, and the only thing it ever writes is the summary itself, placed in my own inbox.
+**It cannot send or delete email.** There is no sending code anywhere in the project. Mailboxes are opened read-only. The only things it ever writes are the summary (placed in my own inbox) and reply drafts (placed in Drafts). I read, edit and send each draft myself, or delete it. A test fails if any sending code (`smtplib`, SMTP) ever appears.
 
 ```
 Mail summary Tue 08:00: 1 job, 1 to reply, 3 to read
@@ -42,6 +42,10 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
  iCloud ├─ IMAP, read-only ─▶ fetch ─▶ SQLite ─▶ classify ─▶ digest ─▶ IMAP APPEND
  Gmail ─┘                              (seen?)   (claude -p,   (group,    into my
                                                   no tools)     format)    inbox
+                                                     │
+                                                  drafts ─▶ IMAP APPEND into each
+                                               (claude -p,  account's Drafts folder
+                                                no tools)
                      launchd runs the whole chain at 08:00 and 18:00
 ```
 
@@ -49,6 +53,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 |---|---|
 | `fetch.py` | Downloads the last day of mail without marking it read; remembers what it has seen |
 | `classify.py` | Sends emails to Claude in batches of 20; gets back a type, a needs-reply flag and a reason |
+| `drafts.py` | Writes reply drafts for emails that need one and places them in each account's Drafts folder |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
 | `label_by_hand.py`, `evaluate.py` | The blind hand-labelling tool and the accuracy report |
 | `store.py`, `paths.py` | The SQLite database, kept in `~/.email-organiser/`, outside the code |
@@ -62,6 +67,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 5. **The model labels; the code acts.** Claude only returns a label. Plain Python decides what happens. Claude runs with every tool and connector switched off, so a malicious email can at worst earn itself a wrong label (prompt injection has nothing to grab).
 6. **Secrets never sit in files.** App passwords live in the macOS Keychain. Personal data lives outside the repo.
 7. **Send the model as little as possible.** Sender, subject and the first 1,500 characters of the body.
+8. **Drafts never decide for me.** A draft never accepts, declines or promises anything; those become [gaps] I fill. Plain text only, no links. Junk (spam, promo, newsletter) never gets a draft, whatever the model says.
 
 ## Things I found along the way
 
@@ -70,6 +76,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **A design fix from the data.** One email was both "job" and "needs a reply", and a single label forced a false choice. "Needs reply" became a separate yes/no flag.
 - **Duplicates beat losses.** Emails are only marked as summarised *after* the summary is delivered. A failed delivery means a repeat next time, never a silently lost email.
 - IMAP's `SINCE` search only understands dates, not times, so the code over-fetches and trims. Yahoo also rejects `HEADER` searches.
+- **Every provider is different.** The Drafts folder is `Draft` on Yahoo, `Drafts` on iCloud (found by name, because iCloud doesn't tag it) and `[Gmail]/Drafts` on Gmail. Yahoo returns an empty answer when asked for just two header fields (`HEADER.FIELDS`), so the first live test addressed a draft to the sender instead of the Reply-To address. The fix fetches the whole header. Yahoo also drops the `\Draft` flag on saved drafts; Mail.app still treats them as drafts because of the folder.
 
 ## Setup
 
@@ -89,6 +96,7 @@ uv run python -m email_organiser.check
 # 4. Try a summary without delivering it
 uv run python -m email_organiser.digest            # dry run
 uv run python -m email_organiser.digest --sample   # preview the HTML in a browser
+uv run python -m email_organiser.drafts --sample   # preview reply drafts for older emails
 
 # 5. Schedule it (08:00 and 18:00) on a stable copy of the code
 scripts/install-schedule.sh
@@ -113,8 +121,8 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 2 | Claude labels mail; blind 50-email test set | ✓ |
 | 3 | Twice-daily summary, scheduled | ✓ |
 | 3.5 | Telegram ping after each summary (counts only) | ✓ |
-| 4 | Reply drafts in the Drafts folder (never sent) | next |
-| 5 | Junk to a review folder; approved unsubscribes | |
+| 4 | Reply drafts in the Drafts folder (never sent) | ✓ |
+| 5 | Junk to a review folder; approved unsubscribes | next |
 | 6 | Instant alert for recruiter and interview mail | |
 | 7 | Learns from my corrections, re-measured weekly | |
 

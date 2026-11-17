@@ -52,14 +52,13 @@ SCHEMA = {
 }
 
 
-def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
-    """Send one batch to Claude. Return ({id: {"label", "reason"}}, model name)."""
-    # json.dumps wraps the email text as data, with clear start and end marks.
-    payload = json.dumps(emails, ensure_ascii=False, indent=1)
+def run_claude(prompt: str, system_prompt: str, schema: dict) -> tuple[dict, str]:
+    """One locked-down Claude call. Returns (answer shaped like `schema`, model name).
+    Shared by classify (labels) and drafts (reply text)."""
     command = [
-        "claude", "-p", f"Label these emails:\n{payload}",
-        "--system-prompt", SYSTEM_PROMPT,
-        "--json-schema", json.dumps(SCHEMA),
+        "claude", "-p", prompt,
+        "--system-prompt", system_prompt,
+        "--json-schema", json.dumps(schema),
         "--output-format", "json",
         # Safety and privacy switches. Each one is checked in milestone 2's notes.
         "--tools", "",              # no tools: it cannot read files, run commands or browse
@@ -76,8 +75,15 @@ def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
         raise RuntimeError(f"no usable answer: {str(reply.get('result'))[:300]}")
 
     model = next(iter(reply.get("modelUsage", {})), "unknown")
-    answers = {item["id"]: item for item in reply["structured_output"]["labels"]}
-    return answers, model
+    return reply["structured_output"], model
+
+
+def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
+    """Send one batch to Claude. Return ({id: {"label", "reason"}}, model name)."""
+    # json.dumps wraps the email text as data, with clear start and end marks.
+    payload = json.dumps(emails, ensure_ascii=False, indent=1)
+    answer, model = run_claude(f"Label these emails:\n{payload}", SYSTEM_PROMPT, SCHEMA)
+    return {item["id"]: item for item in answer["labels"]}, model
 
 
 def classify_pending(db) -> int:
