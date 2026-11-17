@@ -321,7 +321,7 @@ def main() -> None:
     jobs = screener.unshown_high(db)
     if too_old and not args.sample:
         print(f"{len(too_old)} older emails skipped (over {MAX_AGE_HOURS}h old)")
-    if not recent:
+    if not recent and not jobs:
         print("No new emails: no summary this time.")
         if args.live and not args.sample:
             mark_done(db, too_old)

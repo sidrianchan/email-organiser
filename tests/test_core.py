@@ -470,3 +470,26 @@ def test_commission_roles_are_tagged_in_the_summary():
 
 def test_prompt_rates_uk_outside_london_medium():
     assert "outside Hong Kong and London (including the rest of the UK)" in screener.SYSTEM_PROMPT
+
+
+def test_linkedin_links_lose_their_tokens():
+    url = ("https://www.linkedin.com/comm/jobs/view/4417134919/?trackingId=x&otpToken=SECRET&midToken=Y")
+    clean = screener.safe_link(url, "LinkedIn <jobs-noreply@linkedin.com>")
+    assert clean == "https://www.linkedin.com/jobs/view/4417134919/"
+    assert screener.clean_link("https://url.jobsdb.com/ss/c/abc") == "https://url.jobsdb.com/ss/c/abc"
+
+
+def test_jobs_alone_still_produce_a_summary(db, monkeypatch, capsys, tmp_path):
+    db.execute("INSERT INTO jobs (job_key, title, company, location, closing, fit, reason, url) "
+               "VALUES ('k', 'Graduate Analyst', 'Acme', 'HK', '', 'high', 'fits', '')")
+    monkeypatch.setattr(digest, "fetch_new", lambda *a, **k: 0)
+    monkeypatch.setattr(digest, "classify_pending", lambda db: 0)
+    monkeypatch.setattr(digest.screener, "run", lambda *a, **k: 0)
+    monkeypatch.setattr(digest.drafts, "make_drafts", lambda *a, **k: 0)
+    monkeypatch.setattr(digest.cleanup, "run", lambda *a, **k: 0)
+    monkeypatch.setattr(digest.store, "open_db", lambda: db)
+    monkeypatch.setattr(digest.paths, "PREVIEW", tmp_path / "preview.html")
+    monkeypatch.setattr("sys.argv", ["digest"])
+    digest.main()
+    out = capsys.readouterr().out
+    assert "1 good job" in out and "No new emails" not in out

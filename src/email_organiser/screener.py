@@ -163,12 +163,22 @@ def site(domain: str) -> str:
     return ".".join(labels[-keep:])
 
 
+LINKEDIN_JOB = re.compile(r"^https://(?:www\.)?linkedin\.com/(?:comm/)?jobs/view/(\d+)")
+
+
+def clean_link(url: str) -> str:
+    """LinkedIn job links carry tracking and one-time login tokens (otpToken). The plain
+    form opens the same job without them. Other sites' links are left as they are."""
+    m = LINKEDIN_JOB.match(url)
+    return f"https://www.linkedin.com/jobs/view/{m.group(1)}/" if m else url
+
+
 def safe_link(url: str, sender: str) -> str:
     """The link only if it's on the same site as the sender; '' otherwise."""
     host = (urlparse(url).hostname or "").lower()
     sender_site = site(parseaddr(sender or "")[1].rpartition("@")[2])
     if url.startswith("https://") and sender_site and site(host) == sender_site:
-        return url
+        return clean_link(url)
     return ""
 
 
