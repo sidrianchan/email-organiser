@@ -7,10 +7,14 @@ Run in the Terminal app (it waits for your keypresses):
 For each email you give a type (a number) and then answer: needs a reply? (y/n)
 
 It first finishes any emails you labelled before the reply question existed,
-then continues with new ones. It never shows Claude's answer: if you could see
+then continues with new ones. With --pool it labels only the old job-season emails
+picked by grow_testset.py (milestone 7b), shuffled, until all are done. It never shows Claude's answer: if you could see
 Claude's guess you'd tend to agree with it (anchoring), and the test would end up
 measuring Claude against itself. Stop any time with q; progress is saved.
 """
+import argparse
+import random
+
 from . import store
 from .labels import NAMES, REPLY_RULE, describe
 
@@ -46,10 +50,46 @@ def ask_reply() -> int | None:
             return None
 
 
+def label_pool(db) -> None:
+    """Milestone 7b: the picked job-season emails, shuffled (so job emails aren't bunched,
+    which would tempt you to answer 'job' on autopilot). Fixed seed: same order if you resume."""
+    rows = db.execute("""
+        SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.snippet
+        FROM testset_pool p JOIN messages m USING (account, uidvalidity, uid)
+        LEFT JOIN my_labels t USING (account, uidvalidity, uid)
+        WHERE t.label IS NULL ORDER BY m.account, m.uid""").fetchall()
+    random.Random(7).shuffle(rows)
+    total = db.execute("SELECT COUNT(*) FROM testset_pool").fetchone()[0]
+    done = total - len(rows)
+    print(f"{len(rows)} to label ({done}/{total} done). These are older emails (Sep-Nov).\n")
+    for r in rows:
+        show(r)
+        label = ask_type()
+        if label is None:
+            break
+        if label == "skip":
+            continue
+        reply = ask_reply()
+        if reply is None:
+            break
+        db.execute("INSERT OR REPLACE INTO my_labels (account, uidvalidity, uid, label, needs_reply) "
+                   "VALUES (?, ?, ?, ?, ?)", (r["account"], r["uidvalidity"], r["uid"], label, reply))
+        db.commit()
+        done += 1
+        print(f"  -> {label}, reply: {'yes' if reply else 'no'}  ({done}/{total})")
+    print(f"\nPool: {done}/{total} labelled. Stop and resume any time.")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pool", action="store_true", help="label the old job-season emails (7b)")
+    pool = parser.parse_args().pool
     db = store.open_db()
     print(describe())
     print(f"\nNeeds a reply: {REPLY_RULE}\n")
+    if pool:
+        label_pool(db)
+        return
 
     # 1. Emails you labelled before the reply question existed. Your old type is kept,
     #    unless it was the old 'needs_reply' type, which no longer exists: then you

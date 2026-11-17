@@ -62,6 +62,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
 | `watch.py` | The 15-minute check: new job or needs-reply mail → draft → instant counts-only ping. No new mail = no Claude call |
 | `runlock.py` | Makes sure the quick check and the summary never run at the same time |
+| `gate.py`, `grow_testset.py` | The keep-or-reject check for instruction changes; picking old job-season emails for me to label |
 | `learn.py` | Notices my corrections (rescued from Review, moved to junk, replied when Claude said no reply), turns them into sender rules, and runs the weekly accuracy check |
 | `unsubscribe.py` | Lists junk senders, and for the ones I tick sends the RFC 8058 one-click unsubscribe (only when the sender's DKIM signature vouches for the link) |
 | `label_by_hand.py`, `evaluate.py` | The blind hand-labelling tool and the accuracy report |
@@ -96,6 +97,8 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **Retries can burn quota.** An email that keeps failing would be retried by a 15-minute job 96 times a day. The quick check only labels the last 3 hours and only drafts what it's alerting about; the twice-daily summary retries the rest.
 - **The first real correction found itself.** On its first look at my Sent folders, the learning step found I'd replied to a game-prize email Claude had marked "no reply needed".
 - **Measured, not assumed.** The automated weekly check re-labelled my 50 hand-labelled emails and got 44/50 (88%), the same as the hand-scored test two days earlier. Job emails 6/6.
+- **Six job emails proved nothing.** "Job 6/6" sounds perfect, but its honest 95% range was 54–100%. I hand-labelled 37 more from my job season, picked by plain rules plus a random sample (never by Claude, which would only pick the job emails it already recognises). Job recall became 16/19, and two real misses surfaced: a live application update and a recruiter thread, both filed as routine.
+- **Scores wobble, so the gate judges per email.** The same 50 emails scored 44/50 one night and 43/50 an hour later. Re-running only the job emails gave the same answer three times, so the wobble comes from which other emails share a batch. A total-based "keep if the score doesn't drop" rule would have rejected a fix that caught 19/19 job emails in every run. `gate.py` now runs old and new instructions 3 times each and keeps a change only if no job email is lost in every run and at least one is gained in every run.
 - **Sender lists are brittle.** LinkedIn sends job alerts from three different addresses; the dry run caught one I'd missed (a "… are hiring" email) before anything moved.
 
 ## Setup

@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS messages (
 # 7:           corrections    = what you corrected (rescued / marked_junk / replied_unflagged)
 #              sender_rules   = never_move (after 1 rescue) / junk (after 3 junk corrections)
 #              sent_replies   = what you sent in reply to a drafted email (style, later)
-#              scores         = the weekly labelling check
+#              scores         = the weekly labelling check; score_answers = each email's answer that week
+# 7b:          testset_pool   = old job-season emails picked by rule/random for you to label
 # Milestone 2. Two label tables, kept apart on purpose:
 #   claude_labels = what Claude thinks
 #   my_labels     = what YOU say (the "ground truth" we measure Claude against)
@@ -123,6 +124,16 @@ CREATE TABLE IF NOT EXISTS scores (
     week TEXT PRIMARY KEY, total INTEGER, correct INTEGER, job_total INTEGER, job_correct INTEGER,
     reply_correct INTEGER, corr_total INTEGER, corr_correct INTEGER, model TEXT, prompt_hash TEXT,
     line TEXT, shown INTEGER DEFAULT 0, scored_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS score_answers (
+    week TEXT, account TEXT, uidvalidity INTEGER, uid INTEGER,
+    label TEXT, needs_reply INTEGER, is_right INTEGER,
+    PRIMARY KEY (week, account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS testset_pool (
+    account TEXT, uidvalidity INTEGER, uid INTEGER, why TEXT,   -- why = 'rule' or 'random'
+    added_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
 );
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,

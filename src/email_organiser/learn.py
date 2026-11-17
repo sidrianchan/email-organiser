@@ -17,8 +17,8 @@ Three parts, all run inside the 08:00 / 18:00 summary:
 
 3. weekly_score(): once a week Claude re-labels the test set (your 50 hand labels + every
    correction) with today's instructions. The score goes in the Sunday summary and the
-   `scores` table. kept() is the gate for any future change (e.g. prompt examples): keep it
-   only if the score doesn't drop, and the job score never.
+   `scores` table. kept() is the gate for any change (run it with gate.py): judged per email
+   over repeated runs; no job email lost, at least one gained.
    Leakage rule: an email shown to Claude as an example is never scored (none yet).
 """
 import difflib
@@ -220,13 +220,23 @@ def score(items: list, answers: list) -> dict:
             "corr_total": len(corr), "corr_correct": sum(right(i, a) for i, a in corr)}
 
 
-def kept(new: dict, old: dict | None) -> bool:
-    """The gate for any change: no drop in the overall rate, none at all on job emails."""
-    if old is None:
-        return True
-    rate = lambda d, k, n: d[k] / d[n] if d[n] else 1.0
-    return (rate(new, "correct", "total") >= rate(old, "correct", "total")
-            and rate(new, "job_correct", "job_total") >= rate(old, "job_correct", "job_total"))
+def kept(old_runs: list[list[bool]], new_runs: list[list[bool]], is_job: list[bool]) -> tuple[bool, str]:
+    """The gate for any change (Sid, 2026-11-18). Judged per email over repeated runs, because
+    totals wobble by 2-3 emails run to run (batch context). A change is kept only if:
+      * no job email is lost consistently (right in every old run, wrong in every new run), and
+      * at least one job email is gained consistently (wrong in every old run, right in every new).
+    Emails that flip back and forth don't count either way: that's noise.
+    (Written for job fixes. A change aimed at another label needs this rule revisited.)"""
+    n = len(is_job)
+    always = lambda runs, k, v: all(r[k] == v for r in runs)
+    lost = [k for k in range(n) if always(old_runs, k, True) and always(new_runs, k, False)]
+    gained = [k for k in range(n) if always(old_runs, k, False) and always(new_runs, k, True)]
+    job_lost = [k for k in lost if is_job[k]]
+    job_gained = [k for k in gained if is_job[k]]
+    ok = not job_lost and bool(job_gained)
+    why = (f"job emails: {len(job_gained)} gained, {len(job_lost)} lost; "
+           f"all emails: {len(gained)} gained, {len(lost)} lost (consistently, every run)")
+    return ok, why
 
 
 def prompt_hash() -> str:
@@ -275,6 +285,11 @@ def weekly_score(db, live: bool, now: datetime | None = None) -> str | None:
     s = score(items, answers)
     last = db.execute("SELECT * FROM scores ORDER BY week DESC LIMIT 1").fetchone()
     text = line(s, dict(last) if last else None, model, bool(last) and last["prompt_hash"] != prompt_hash())
+    # Each email's answer too: the total wobbles run to run (batch context), so a drop must be
+    # traced to the emails that flipped before anyone believes it.
+    db.executemany("INSERT OR REPLACE INTO score_answers VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   [(week, i["account"], i["uidvalidity"], i["uid"], a["label"], int(a["needs_reply"]),
+                     int(right(i, a))) for i, a in zip(items, answers) if a])
     db.execute("""INSERT INTO scores (week, total, correct, job_total, job_correct, reply_correct,
                   corr_total, corr_correct, model, prompt_hash, line) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                (week, s["total"], s["correct"], s["job_total"], s["job_correct"], s["reply_correct"],

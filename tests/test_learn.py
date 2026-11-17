@@ -149,12 +149,17 @@ def test_score_and_right():
     assert (s["corr_correct"], s["corr_total"]) == (2, 3)
 
 
-def test_gate_keeps_only_changes_that_dont_drop():
-    old = dict(correct=44, total=50, job_correct=6, job_total=6)
-    assert learn.kept(dict(correct=45, total=50, job_correct=6, job_total=6), old)
-    assert not learn.kept(dict(correct=43, total=50, job_correct=6, job_total=6), old)
-    assert not learn.kept(dict(correct=48, total=50, job_correct=5, job_total=6), old)  # job never drops
-    assert learn.kept(dict(correct=1, total=1, job_correct=0, job_total=0), None)
+def test_gate_judges_per_email_and_ignores_wobble():
+    is_job = [True, True, False, False]
+    old = [[True, False, True, True]] * 3
+    # job email 1 fixed in every run; email 2 wrong every run (a cheap loss); email 3 wobbles
+    new = [[True, True, False, True], [True, True, False, False], [True, True, False, True]]
+    ok, why = learn.kept(old, new, is_job)
+    assert ok and "job emails: 1 gained, 0 lost" in why and "1 gained, 1 lost" in why
+    # a job email lost in every run blocks the change, whatever else improves
+    assert not learn.kept(old, [[False, True, True, True]] * 3, is_job)[0]
+    # a job email right in only some new runs isn't a gain
+    assert not learn.kept(old, [[True, True, True, True], [True, False, True, True], [True, True, True, True]], is_job)[0]
 
 
 def test_weekly_score_runs_once_a_week_and_warns_on_job_drop(db, monkeypatch):
@@ -170,6 +175,9 @@ def test_weekly_score_runs_once_a_week_and_warns_on_job_drop(db, monkeypatch):
     assert learn.weekly_score(db, live=True, now=sunday + timedelta(hours=14)) is None   # same week
     second = learn.weekly_score(db, live=True, now=sunday + timedelta(days=7))
     assert "WARNING: job emails dropped" in second and len(calls) == 2
+    flipped = db.execute("SELECT a.uid FROM score_answers a JOIN score_answers b USING (account, uidvalidity, uid) "
+                         "WHERE a.week < b.week AND a.is_right = 1 AND b.is_right = 0").fetchall()
+    assert [r[0] for r in flipped] == [1]      # the job email that flipped can be named
 
 
 def test_dry_run_makes_no_claude_calls(db, monkeypatch):
@@ -193,3 +201,29 @@ def test_learning_failure_never_stops_the_summary(db, monkeypatch, capsys):
     monkeypatch.setattr(learn, "collect", boom)
     learn.step(db, live=True)
     assert "FAILED" in capsys.readouterr().out
+
+
+# --- 7b: growing the test set -----------------------------------------------------------------
+
+def test_rule_picks_are_job_shaped_and_skip_alert_digests():
+    from email_organiser.grow_testset import is_rule_pick
+    assert is_rule_pick("lseg@myworkday.com", "Workday", "Your update")          # application system
+    assert is_rule_pick("hr@bank.test", "Bank", "Interview invitation")          # job word
+    assert is_rule_pick("hr@bank.test", "Bank", "面試邀請")
+    assert not is_rule_pick("jobalerts-noreply@linkedin.com", "LinkedIn Job Alerts", "Interview tips")
+    assert not is_rule_pick("noreply@e.jobsdb.com", "Jobsdb Recommendations", "New roles")
+    assert not is_rule_pick("deals@shop.test", "Shop", "Big sale")
+
+
+def test_choose_caps_senders_and_adds_random_without_claude():
+    import random
+    from email_organiser import grow_testset as g
+    cands = ([dict(sender="hr@a.test", name="A", subject=f"Interview {i}") for i in range(10)]
+             + [dict(sender=f"x{i}@b.test", name="B", subject="Hello") for i in range(30)])
+    picks = g.choose(cands, random.Random(1))
+    rule = [p for p in picks if p["why"] == "rule"]
+    assert len(rule) == g.PER_SENDER                     # one sender can't flood the set
+    assert sum(p["why"] == "random" for p in picks) == g.RANDOM_PICKS
+    assert all(p["subject"] == "Hello" for p in picks if p["why"] == "random")
+    assert g.choose(cands, random.Random(1)) == picks    # same seed, same picks
+    assert "classify" not in open(g.__file__).read()     # Claude never chooses the test set

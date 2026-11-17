@@ -11,8 +11,12 @@ LABELS = {
     "job":         "An employer or recruiter did something about Sid's OWN job hunt: "
                    "viewed or updated an application, rejected it, asked for information, "
                    "invited him to an interview or assessment, made an offer, or contacted him. "
-                   "NOT confirmations of something Sid did himself ('application submitted' "
-                   "is 'fyi'), and NOT job-listing alerts or recommendations ('newsletter').",
+                   "ALSO job: any later message about an application already in progress, even "
+                   "if automated (status updates, 'we've received your assessment', next steps, "
+                   "reminders to complete a stage), and any message in a thread with a recruiter, "
+                   "including replies to his questions. NOT job: only the very first 'we received "
+                   "your application' / 'application submitted' confirmation ('fyi'), and "
+                   "job-listing alerts or recommendations ('newsletter').",
     "spam":        "Unwanted junk, scams, or anything that looks like phishing.",
     "read":        "Worth reading today, no reply needed: security alerts, bills, "
                    "deliveries, personal news, account changes.",
