@@ -10,8 +10,12 @@ lesson would vanish after week one. So we read each event with its repeat rule (
 e.g. "FREQ=WEEKLY;INTERVAL=1") and work out the dates ourselves with dateutil.
 That takes ~90 s, which is fine for a twice-daily job.
 
-Known gap: AppleScript can't see a single moved or cancelled occurrence of a repeating
-event, so that one occurrence shows as if it were unchanged.
+Changed single dates of a repeating event (checked on a real test event, 2026-11-18):
+  * cancelled: Calendar lists the date in the event's "excluded dates", so we skip it;
+  * moved: Calendar keeps an extra copy with the same ID (uid) at the new time. We show
+    that copy as a one-off and hide the series date it replaced (the nearest one).
+Reading these needs the bulk read below: asking event by event returns the series' own
+details for every copy, because AppleScript finds events by their ID.
 
 Usage: reading the calendar costs nothing. Claude is asked only about events it hasn't
 judged before (a new interview, a new exam), so most mornings make no Claude call at all.
@@ -40,13 +44,17 @@ on run argv
         repeat with c in calendars
             set cn to name of c
             if cn is not in skip and (count of events of c) > 0 then
-                set {ts, ss, es, rr, ad} to {summary, start date, end date, recurrence, allday event} of every event of c
+                set {ts, ss, es, rr, ad, ids, xx} to {summary, start date, end date, recurrence, allday event, uid, excluded dates} of every event of c
                 repeat with i from 1 to count of ts
                     set t to item i of ts
                     if t is missing value then set t to ""
                     set r to item i of rr
                     if r is missing value then set r to ""
-                    set out to out & cn & fs & t & fs & ((item i of ss) as «class isot» as string) & fs & ((item i of es) as «class isot» as string) & fs & r & fs & (item i of ad) & rs
+                    set xs to ""
+                    repeat with x in (item i of xx)
+                        set xs to xs & (x as «class isot» as string) & ","
+                    end repeat
+                    set out to out & cn & fs & t & fs & ((item i of ss) as «class isot» as string) & fs & ((item i of es) as «class isot» as string) & fs & r & fs & (item i of ad) & fs & (item i of ids) & fs & xs & rs
                 end repeat
             end if
         end repeat
@@ -69,12 +77,46 @@ def parse(raw: str) -> list[dict]:
     events = []
     for rec in raw.strip("\n").split(RECORD):
         parts = rec.strip("\n").split(FIELD)
-        if len(parts) != 6:
+        if len(parts) != 8:
             continue  # empty tail or a malformed record: skip it, don't fail the summary
-        cal, title, start, end, rule, allday = parts
+        cal, title, start, end, rule, allday, uid, excluded = parts
         events.append(dict(calendar=cal, title=title.strip(),
                            start=datetime.fromisoformat(start), end=datetime.fromisoformat(end),
-                           rule=rule.strip(), allday=allday.strip() == "true"))
+                           rule=rule.strip(), allday=allday.strip() == "true", uid=uid.strip(),
+                           excluded={datetime.fromisoformat(x) for x in excluded.split(",") if x.strip()}))
+    return resolve_moved(events)
+
+
+def series_starts(ev: dict, after: datetime, before: datetime) -> list[datetime]:
+    """Start times of a repeating event between two moments (cancelled dates included)."""
+    # Calendar's dates have no time zone, so drop a UTC "Z" on UNTIL, or dateutil refuses
+    # to mix them. Off by up to 8 hours on the last repeat only.
+    rule = ";".join(p.rstrip("Z") if p.startswith("UNTIL=") else p for p in ev["rule"].split(";"))
+    return rrulestr(rule, dtstart=ev["start"]).between(after, before, inc=True)
+
+
+def resolve_moved(events: list[dict]) -> list[dict]:
+    """Copies of a repeating event sharing one uid = the series plus dates moved by hand.
+    The series is the earliest copy. Each later copy becomes a one-off at its own time, and
+    the series date nearest to it is hidden (that's the date that was moved)."""
+    by_uid: dict[str, list] = {}
+    for ev in events:
+        if ev["rule"] and ev["uid"]:
+            by_uid.setdefault(ev["uid"], []).append(ev)
+    for copies in by_uid.values():
+        if len(copies) < 2:
+            continue
+        series, *moved = sorted(copies, key=lambda ev: ev["start"])
+        for m in moved:
+            m["rule"] = ""   # a one-off now, not a second series
+            try:
+                near = [s for s in series_starts(series, m["start"] - timedelta(days=400),
+                                                 m["start"] + timedelta(days=400))
+                        if s not in series["excluded"]]
+                if near:
+                    series["excluded"].add(min(near, key=lambda s: abs(s - m["start"])))
+            except Exception:
+                pass  # unreadable rule: occurrences() falls back to the first date anyway
     return events
 
 
@@ -85,10 +127,8 @@ def occurrences(ev: dict, day_start: datetime, day_end: datetime) -> list[tuple[
         starts = [ev["start"]]
     else:
         try:
-            # Calendar's dates have no time zone, so drop a UTC "Z" on UNTIL, or dateutil refuses
-            # to mix them. Off by up to 8 hours on the last repeat only.
-            rule = ";".join(p.rstrip("Z") if p.startswith("UNTIL=") else p for p in ev["rule"].split(";"))
-            starts = rrulestr(rule, dtstart=ev["start"]).between(day_start - length, day_end, inc=True)
+            starts = [s for s in series_starts(ev, day_start - length, day_end)
+                      if s not in ev.get("excluded", ())]   # cancelled or moved dates
         except Exception:
             starts = [ev["start"]]  # an unreadable rule: show the first date at least
     return [(s, s + length) for s in starts if s < day_end and s + length > day_start]

@@ -10,8 +10,9 @@ from email_organiser.agenda import FIELD, RECORD
 
 
 def raw(*events) -> str:
-    """Fake osascript output: (calendar, title, start, end, rule, allday) per event."""
-    return "".join(FIELD.join(ev) + RECORD for ev in events) + "\n"
+    """Fake osascript output: (calendar, title, start, end, rule, allday[, uid, excluded]) per event."""
+    padded = (ev + ("", "")[: 8 - len(ev)] for ev in events)
+    return "".join(FIELD.join(ev) + RECORD for ev in padded) + "\n"
 
 
 WED = date(2026, 11, 18)
@@ -27,6 +28,29 @@ def test_repeating_events_appear_on_later_dates():
     assert [e["title"] for e in evs] == ["Kai birthday", "Seminar", "Driving lesson"]  # all-day first
     assert evs[1]["start"] == datetime(2026, 11, 18, 10, 0)   # 3rd week of a weekly event
     # the monthly rule ended in Jan 2025, and last week's lesson isn't this week's
+
+
+# The real pattern, read from a test event Sid made on 2026-11-18: weekly from Mon 23 Nov 12:00,
+# the 30 Nov one moved to 17:15, the 7 Dec one deleted.
+SERIES = ("plan", "TEST weekly", "2026-11-23T12:00:00", "2026-11-23T13:00:00",
+          "FREQ=WEEKLY;INTERVAL=1", "false", "U1", "2026-12-07T12:00:00,")
+MOVED = ("plan", "TEST weekly", "2026-11-30T17:15:00", "2026-11-30T18:15:00",
+         "FREQ=WEEKLY;INTERVAL=1", "false", "U1", "")
+
+
+def test_moved_date_shows_at_its_new_time_only():
+    evs = agenda.parse(raw(MOVED, SERIES))   # order from Calendar isn't guaranteed
+    on_30 = agenda.for_day(evs, date(2026, 11, 30))
+    assert [(e["start"].hour, e["start"].minute) for e in on_30] == [(17, 15)]
+    assert len(agenda.for_day(evs, date(2026, 12, 7))) == 0         # deleted
+    assert agenda.for_day(evs, date(2026, 12, 14))[0]["start"].hour == 12   # series carries on
+    assert len(agenda.for_day(evs, date(2026, 11, 23))) == 1
+
+
+def test_cancelled_date_is_skipped():
+    evs = agenda.parse(raw(SERIES))
+    assert agenda.for_day(evs, date(2026, 12, 7)) == []
+    assert len(agenda.for_day(evs, date(2026, 11, 30))) == 1
 
 
 def test_utc_until_does_not_break_the_rule():
