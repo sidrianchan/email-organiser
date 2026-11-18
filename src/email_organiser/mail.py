@@ -8,6 +8,13 @@ from . import paths
 
 SERVICE = "email-organiser"  # the Keychain label store_password.py saves under
 
+# Seconds of silence from the server before a read gives up. Without it, a
+# connection broken by sleep or a network change waits forever: on 18 Nov a
+# quick check hung for 2 hours, holding the run lock, so the 18:00 summary was
+# 23 minutes late and no quick check ran. A slow SEARCH on the big Yahoo inbox
+# can take tens of seconds, hence 120 rather than less.
+TIMEOUT = 120
+
 
 def load_accounts() -> list[dict]:
     """accounts.toml holds names, servers and addresses. No passwords."""
@@ -22,6 +29,6 @@ def connect(account: dict) -> IMAPClient:
     """
     # Google shows app passwords with spaces only for readability: remove them.
     password = keyring.get_password(SERVICE, account["name"]).replace(" ", "")
-    client = IMAPClient(account["host"], ssl=True)  # encrypted, port 993
+    client = IMAPClient(account["host"], ssl=True, timeout=TIMEOUT)  # encrypted, port 993
     client.login(account["username"], password)
     return client
