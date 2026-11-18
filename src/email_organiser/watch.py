@@ -1,6 +1,7 @@
 """Milestone 6: every 15 minutes, a quick check for job and needs-reply mail, with an instant ping.
 
-One check = fetch new mail -> Claude labels it (only if there is new mail) -> for new job or
+One check = emails you dragged into an Unsubscribe folder (unsub_folder.py, no Claude call)
+-> fetch new mail -> Claude labels it (only if there is new mail) -> for new job or
 needs-reply emails: write the reply draft now -> Telegram ping, counts only.
 Junk moving and job-alert screening stay in the 08:00 / 18:00 summary.
 
@@ -20,7 +21,7 @@ Rules:
 import argparse
 from datetime import datetime, timedelta, timezone
 
-from . import drafts, notify, store
+from . import drafts, notify, store, unsub_folder
 from .classify import classify_pending
 from .fetch import fetch_new
 from .runlock import run_lock
@@ -65,8 +66,23 @@ def message(rows: list, now: datetime) -> tuple[str, bool]:
     return text, not quiet(now)
 
 
+def unsubscribe_step(db, live: bool, now: datetime) -> None:
+    """Emails you dragged into an Unsubscribe folder (unsub_folder.py). Never raises, so
+    a problem here can't stop the job alerts below."""
+    try:
+        text = unsub_folder.ping_text(unsub_folder.run(db, live))
+        if text and live:
+            notify.send(text, not quiet(now))
+            print(f"Telegram ping sent: {text}")
+        elif text:
+            print(f"(dry run: ping not sent; it would say: {text})")
+    except Exception as e:  # results are in the DB; the summary still lists them
+        print(f"Unsubscribe step FAILED (alerts unaffected): {e}")
+
+
 def check(db, live: bool, now: datetime | None = None) -> int:
     """One quick check. Returns how many emails were pinged about."""
+    unsubscribe_step(db, live, now or datetime.now())
     fetch_new(db, LOOKBACK_HOURS, show=False)
     classify_pending(db, since_hours=LOOKBACK_HOURS)
     rows = to_alert(db)

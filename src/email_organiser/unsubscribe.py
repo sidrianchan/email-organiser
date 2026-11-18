@@ -1,4 +1,7 @@
-"""Milestone 5b: unsubscribe from junk senders you pick, about once a week.
+"""Milestone 5b: unsubscribe from junk senders you pick, from a list in Terminal.
+
+The everyday way is now dragging an email into an Unsubscribe folder (unsub_folder.py);
+this command is the fallback, and its checks are shared with it.
 
 Run it on the Mac (nothing about your picks leaves the Mac):
     python3 -m uv run python -m email_organiser.unsubscribe           (preview: changes nothing)
@@ -43,7 +46,7 @@ from email import policy
 from email.utils import parseaddr
 from urllib.parse import urlsplit
 
-from . import notify, store
+from . import store
 from .cleanup import is_job_board
 from .mail import connect, load_accounts
 
@@ -63,18 +66,37 @@ def _domain(value: str) -> str:
     return value.strip().strip(";").rpartition("@")[2].lower()
 
 
+def _provider(header: str) -> str | None:
+    """Which trusted provider wrote this Authentication-Results header, or None."""
+    verifier = header.split(";", 1)[0].strip().lower()
+    return next((t for t in TRUSTED_VERIFIERS if verifier == t or verifier.endswith("." + t)), None)
+
+
+def receiver_results(msg) -> list[str]:
+    """The Authentication-Results headers written by the provider that received the email.
+
+    RFC 8601 (checked 18 Nov): the receiving server's header "MUST be prepended" (added at
+    the top, s4.1), and it "MUST delete any discovered instance" claiming to come from itself
+    (s5). So the FIRST Authentication-Results header is the receiver's, and the receiver has
+    already deleted fakes in its own name. It does NOT delete fakes claiming to be another
+    provider: before this rule, a fake "mta.yahoo.com; dkim=pass" in mail sent to Gmail
+    counted. Now only headers from the provider that wrote the first one count.
+    (Not "one unbroken block": iCloud puts X-ARC-Info and X-DMARC-Info lines between its
+    own six headers, seen on real mail 18 Nov.) This also makes a cross-account move in
+    Mail.app safe: the receiving provider's headers travel with the email."""
+    results = [_flat(v) for v in msg.get_all("Authentication-Results") or []]
+    provider = _provider(results[0]) if results else None
+    return [h for h in results if provider and _provider(h) == provider]
+
+
 def verified_domains(msg) -> set[str]:
     """Domains whose DKIM signature your own mail provider checked and passed.
 
-    Only Authentication-Results headers written by Yahoo, Google or iCloud count. A sender
-    can put a fake "dkim=pass" header in its own email, but it can't make it come from
-    mx.google.com (and providers strip ones claiming to)."""
+    Only the receiving provider's own Authentication-Results headers count (see
+    receiver_results). A sender can write a fake "dkim=pass" header into its email, but
+    it can't place it above the headers the receiving provider adds."""
     passed = set()
-    for header in msg.get_all("Authentication-Results") or []:
-        header = _flat(header)
-        verifier = header.split(";", 1)[0].strip().lower()
-        if not any(verifier == t or verifier.endswith("." + t) for t in TRUSTED_VERIFIERS):
-            continue
+    for header in receiver_results(msg):
         for clause in header.split(";")[1:]:
             clause = clause.strip()
             if not clause.startswith("dkim=pass"):
@@ -372,7 +394,7 @@ def run(db, live: bool, ask=input) -> None:
               "if mail keeps coming, this list will say so.")
 
 
-# --- missing headers for mail fetched before 5b, and the weekly nudge --------------------
+# --- missing headers for mail fetched before 5b --------------------------------------
 
 def backfill(db) -> int:
     """Read the headers (read-only, BODY.PEEK) of junk mail fetched before 5b that is still
@@ -401,36 +423,6 @@ def backfill(db) -> int:
             found += bool(raw)
     db.commit()
     return found
-
-
-def last_sunday_noon(now: datetime) -> datetime:
-    noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
-    sunday = noon - timedelta(days=(now.weekday() + 1) % 7)   # weekday(): Monday 0 ... Sunday 6
-    return sunday if sunday <= now else sunday - timedelta(days=7)
-
-
-def weekly_nudge(db, live: bool, now: datetime | None = None) -> None:
-    """From Sunday noon, the first scheduled run sends one counts-only Telegram nudge
-    (once per week; a missed Sunday is caught up on Monday). Never raises."""
-    try:
-        week = last_sunday_noon(now or datetime.now()).date().isoformat()
-        if db.execute("SELECT 1 FROM nudges WHERE week = ?", (week,)).fetchone():
-            return
-        review, still = candidates(db)
-        if not review and not still:
-            return
-        bits = [f"{len(review)} junk sender{'s' if len(review) != 1 else ''} to review" if review else "",
-                f"{len(still)} still sending after unsubscribe" if still else ""]
-        text = f"Weekly: {', '.join(b for b in bits if b)}. On the Mac run scripts/unsubscribe.sh"
-        if not live:
-            print(f"(dry run: weekly nudge not sent; it would say: {text})")
-            return
-        notify.send(text, loud=False)
-        db.execute("INSERT INTO nudges (week) VALUES (?)", (week,))
-        db.commit()
-        print(f"Weekly unsubscribe nudge sent: {text}")
-    except Exception as e:
-        print(f"Weekly nudge FAILED (summary unaffected): {e}")
 
 
 def main() -> None:

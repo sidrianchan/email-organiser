@@ -227,3 +227,10 @@ def test_choose_caps_senders_and_adds_random_without_claude():
     assert all(p["subject"] == "Hello" for p in picks if p["why"] == "random")
     assert g.choose(cands, random.Random(1)) == picks    # same seed, same picks
     assert "classify" not in open(g.__file__).read()     # Claude never chooses the test set
+
+
+def test_last_sunday_noon():
+    from datetime import datetime
+    assert learn.last_sunday_noon(datetime(2026, 11, 22, 18, 0)) == datetime(2026, 11, 22, 12, 0)  # Sun 18:00
+    assert learn.last_sunday_noon(datetime(2026, 11, 22, 8, 0)) == datetime(2026, 11, 15, 12, 0)   # Sun 08:00
+    assert learn.last_sunday_noon(datetime(2026, 11, 23, 8, 0)) == datetime(2026, 11, 22, 12, 0)   # Mon catch-up

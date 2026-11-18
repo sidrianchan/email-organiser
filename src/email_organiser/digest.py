@@ -2,8 +2,8 @@
 
 One run = fetch new mail -> Claude labels it -> job alerts screened -> reply drafts (milestone 4)
           -> junk to Assistant-Review (milestone 5) -> your calendar (08:00 only: today + what needs preparing this week)
-          -> build a summary -> put it in your inbox -> Telegram ping
-          -> once a week, a Telegram nudge to pick senders to unsubscribe from (milestone 5b).
+          -> build a summary -> put it in your inbox -> Telegram ping.
+The summary also lists what happened to emails you dragged into an Unsubscribe folder (unsub_folder.py).
 
 Dry run by default (design rule 0): prints the summary and changes nothing.
     python3 -m uv run python -m email_organiser.digest
@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import agenda, cleanup, drafts, learn, notify, paths, screener, store, unsubscribe
+from . import agenda, cleanup, drafts, learn, notify, paths, screener, store, unsub_folder
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -372,13 +372,11 @@ def main() -> None:
     with run_lock(wait_seconds=900) as got:
         if not got:
             print("quick check still running after 15 min: summarising anyway")
-        db, live = summarise()
-        if db is not None:
-            unsubscribe.weekly_nudge(db, live)   # never raises; after the ping
+        summarise()
 
 
 def summarise():
-    """The summary run. Returns (database, live); database is None for a --sample preview (no nudge)."""
+    """The summary run. Returns (database, live); database is None for a --sample preview."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="really deliver the summary")
     parser.add_argument("--sample", action="store_true",
@@ -420,7 +418,7 @@ def summarise():
         return (None if args.sample else db), args.live
 
     subject = subject_line(sections(recent), len(recent), jobs, cal)
-    notes = learn.unshown_lines(db)
+    notes = learn.unshown_lines(db) + unsub_folder.unshown_lines(db)
     text, html_body = build_text(recent, jobs, notes, cal), build_html(recent, jobs, notes, cal)
     print(f"\nSubject: {subject}\n\n{text}\n")
 
@@ -432,6 +430,7 @@ def summarise():
             mark_done(db, recent + too_old)  # only after delivery worked
             screener.mark_shown(db, jobs)
             learn.mark_shown(db)
+            unsub_folder.mark_shown(db)
         print(f"Delivered to your {DELIVER_TO} inbox.")
         notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO)  # after delivery; can't undo it
     else:

@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS messages (
 # Screener:    screened  = job alerts already read; jobs = one row per job found (deduplicated).
 # 5b:          unsub_headers  = each email's unsubscribe link, saved at fetch (you may delete the email)
 #              sender_choices = per sender: unsubscribed / by_hand / keep / just shown (NULL)
-#              nudges         = weeks the Telegram "senders to review" nudge went out
+#              nudges         = weeks the Telegram "senders to review" nudge went out (retired)
+#              unsub_requests = emails you dragged into an Unsubscribe folder, and what happened
 # 6:           alerted        = emails the 15-minute check already pinged about
 # 7:           corrections    = what you corrected (rescued / marked_junk / replied_unflagged)
 #              sender_rules   = never_move (after 1 rescue) / junk (after 3 junk corrections)
@@ -139,6 +140,14 @@ CREATE TABLE IF NOT EXISTS event_flags (
     event_key TEXT PRIMARY KEY,        -- title + start time: each calendar event is judged once
     important INTEGER, prep TEXT, model TEXT,
     judged_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS unsub_requests (
+    id INTEGER PRIMARY KEY,
+    account TEXT, sender TEXT, subject TEXT,
+    result TEXT,                       -- unsubscribed / by_hand / refused / failed
+    detail TEXT, job_board INTEGER DEFAULT 0,
+    done_at TEXT DEFAULT (datetime('now')),
+    shown INTEGER DEFAULT 0            -- 1 = already listed in a summary
 );
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,

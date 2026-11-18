@@ -257,37 +257,6 @@ def test_redirects_are_not_followed_and_2xx_is_success():
         server.shutdown()
 
 
-# --- weekly nudge -----------------------------------------------------------------------
-
-def test_last_sunday_noon():
-    assert u.last_sunday_noon(datetime(2026, 11, 22, 18, 0)) == datetime(2026, 11, 22, 12, 0)  # Sun 18:00
-    assert u.last_sunday_noon(datetime(2026, 11, 22, 8, 0)) == datetime(2026, 11, 15, 12, 0)   # Sun 08:00
-    assert u.last_sunday_noon(datetime(2026, 11, 23, 8, 0)) == datetime(2026, 11, 22, 12, 0)   # Mon catch-up
-
-
-def test_nudge_is_counts_only_and_once_a_week(db, monkeypatch):
-    add(db, 1, "Secret Shop <secret@shop.test>", "promo", unsub=SIGNED)
-    sent = []
-    monkeypatch.setattr(u.notify, "send", lambda text, loud: sent.append((text, loud)))
-    sunday = datetime(2026, 11, 22, 18, 0)
-    u.weekly_nudge(db, live=True, now=sunday)
-    u.weekly_nudge(db, live=True, now=datetime(2026, 11, 23, 8, 0))   # same week: no repeat
-    assert len(sent) == 1
-    text, loud = sent[0]
-    assert "1 junk sender to review" in text and not loud
-    assert "Secret" not in text and "shop.test" not in text      # nothing from the email
-
-
-def test_nudge_failure_never_raises(db, monkeypatch, capsys):
-    add(db, 1, "A <a@a.test>", "promo", unsub=SIGNED)
-    def boom(*a, **k):
-        raise RuntimeError("telegram down")
-    monkeypatch.setattr(u.notify, "send", boom)
-    u.weekly_nudge(db, live=True, now=datetime(2026, 11, 22, 18, 0))
-    assert "FAILED" in capsys.readouterr().out
-    assert db.execute("SELECT COUNT(*) FROM nudges").fetchone()[0] == 0   # retried next run
-
-
 def test_fetch_saves_unsubscribe_headers(db):
     from email_organiser.fetch import parse_message
     raw = headers().as_bytes()

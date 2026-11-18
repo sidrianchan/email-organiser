@@ -32,12 +32,18 @@ from .classify import BATCH_SIZE, SYSTEM_PROMPT, ask_claude
 from .cleanup import MOVE_LABELS, REVIEW
 from .fetch import body_text
 from .mail import connect, load_accounts
-from .unsubscribe import last_sunday_noon
 
 WINDOW_DAYS = 14     # how far back to look for corrections
 JUNK_AFTER = 3       # junk corrections needed before a sender is labelled junk without Claude
 JUNK_NAMES = ("junk", "spam", "bulk", "bulk mail", "[gmail]/spam")
 SENT_NAMES = ("sent", "sent messages", "sent items", "[gmail]/sent mail")
+
+
+def last_sunday_noon(now: datetime) -> datetime:
+    """Start of the scoring week (moved here from unsubscribe.py when the weekly nudge retired)."""
+    noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    sunday = noon - timedelta(days=(now.weekday() + 1) % 7)   # weekday(): Monday 0 ... Sunday 6
+    return sunday if sunday <= now else sunday - timedelta(days=7)
 
 
 from .store import sender_address as address
