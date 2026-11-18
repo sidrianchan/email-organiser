@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS testset_pool (
     added_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (account, uidvalidity, uid)
 );
+CREATE TABLE IF NOT EXISTS event_flags (
+    event_key TEXT PRIMARY KEY,        -- title + start time: each calendar event is judged once
+    important INTEGER, prep TEXT, model TEXT,
+    judged_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     label TEXT NOT NULL,

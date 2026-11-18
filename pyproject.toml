@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "imapclient>=4.2.0",
     "keyring>=25.7.0",
+    "python-dateutil>=4.0.0",
 ]
 
 [project.scripts]

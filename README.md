@@ -60,6 +60,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `screener.py` | Reads job-alert emails, has Claude list and rate every job against my profile, keeps the high-fit ones (links checked, duplicates and jobs I've applied to removed) |
 | `cleanup.py` | Moves recent spam, promos and newsletters to `Assistant-Review` (never job mail, anything needing a reply, or job-board alerts) |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
+| `agenda.py` | Reads macOS Calendar (read-only) for the 08:00 summary: today's events, plus anything in the next 7 days that needs preparing. Claude judges each event once (true/false + a prep note), so most mornings make no Claude call |
 | `watch.py` | The 15-minute check: new job or needs-reply mail → draft → instant counts-only ping. No new mail = no Claude call |
 | `runlock.py` | Makes sure the quick check and the summary never run at the same time |
 | `gate.py`, `grow_testset.py` | The keep-or-reject check for instruction changes; picking old job-season emails for me to label |
@@ -95,6 +96,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **Google doesn't follow the header format.** The standard wraps unsubscribe links in `<...>`; Google sends them bare. The first real dry run listed Google Health as "no unsubscribe header" until the parser accepted both.
 - **A sleeping Mac skips checks.** `launchd`'s `StartInterval` drops a check that falls due while the Mac is asleep (it says so in `man launchd.plist`), unlike the calendar schedule, which runs on wake. The quick check looks back 3 hours, and the summary 26, so nothing is lost.
 - **Retries can burn quota.** An email that keeps failing would be retried by a 15-minute job 96 times a day. The quick check only labels the last 3 hours and only drafts what it's alerting about; the twice-daily summary retries the rest.
+- **Calendar's date search misses repeating events.** Asking Calendar.app for one day's events only returns a repeating event on its first date, so a weekly class would vanish after week one. The summary reads every event with its repeat rule and works out the dates itself (~70 s, fine twice a day). A failed read is printed in the summary, so a blank calendar never looks like a free day.
 - **The first real correction found itself.** On its first look at my Sent folders, the learning step found I'd replied to a game-prize email Claude had marked "no reply needed".
 - **Measured, not assumed.** The automated weekly check re-labelled my 50 hand-labelled emails and got 44/50 (88%), the same as the hand-scored test two days earlier. Job emails 6/6.
 - **Six job emails proved nothing.** "Job 6/6" sounds perfect, but its honest 95% range was 54–100%. I hand-labelled 37 more from my job season, picked by plain rules plus a random sample (never by Claude, which would only pick the job emails it already recognises). Job recall became 16/19, and two real misses surfaced: a live application update and a recruiter thread, both filed as routine.
@@ -154,6 +156,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 5b | Weekly unsubscribe from senders I tick | ✓ |
 | 6 | Instant alert for recruiter and interview mail (every 15 min) | ✓ |
 | 7 | Learns from my corrections, re-measured weekly (prompt examples and reply style once ~10 corrections exist) | ✓ |
+| 8 | Calendar in the 08:00 summary: today, plus a 7-day countdown for events that need preparing | ✓ |
 
 ## How this was built
 

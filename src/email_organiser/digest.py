@@ -1,7 +1,8 @@
 """Milestone 3: the twice-daily summary.
 
 One run = fetch new mail -> Claude labels it -> job alerts screened -> reply drafts (milestone 4)
-          -> junk to Assistant-Review (milestone 5) -> build a summary -> put it in your inbox -> Telegram ping
+          -> junk to Assistant-Review (milestone 5) -> your calendar (08:00 only: today + what needs preparing this week)
+          -> build a summary -> put it in your inbox -> Telegram ping
           -> once a week, a Telegram nudge to pick senders to unsubscribe from (milestone 5b).
 
 Dry run by default (design rule 0): prints the summary and changes nothing.
@@ -22,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import cleanup, drafts, learn, notify, paths, screener, store, unsubscribe
+from . import agenda, cleanup, drafts, learn, notify, paths, screener, store, unsubscribe
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -115,15 +116,45 @@ def when(r) -> str:
     return t.strftime("%H:%M") if t.date() == datetime.now().date() else t.strftime("%a %H:%M")
 
 
-def subject_line(g: dict, total: int, jobs: list = ()) -> str:
+def cal_bit(cal) -> str:
+    """'1 event today, 1 coming up', or '' when there's nothing (or it couldn't be read)."""
+    if not cal or cal["events"] is None:
+        return ""
+    n, u = len(cal["events"]), len(cal["upcoming"])
+    return ", ".join(b for b in (f"{n} event{'s' if n > 1 else ''} today" if n else "",
+                                 f"{u} coming up" if u else "") if b)
+
+
+def has_cal(cal) -> bool:
+    return bool(cal and (cal["events"] or cal["upcoming"]))
+
+
+def cal_heading(cal) -> str:
+    return f"{cal['label']}, {cal['day']:%a %-d %b}"   # 'Today, Wed 18 Nov'
+
+
+def cal_note(cal) -> list:
+    """A failed calendar read is said out loud, so an empty section is never mistaken for a free day."""
+    if not cal:
+        return []
+    if cal["events"] is None:
+        return ["Calendar couldn't be read this time, so events are missing from this summary."]
+    if not cal["judged"]:
+        return ["Couldn't check which upcoming events need preparing this time; retrying tomorrow."]
+    return []
+
+
+def subject_line(g: dict, total: int, jobs: list = (), cal=None) -> str:
     stamp = datetime.now().strftime("%a %H:%M")
+    lead = cal_bit(cal) + (", " if cal_bit(cal) else "")
     if jobs or g["job"] or g["reply"] or g["read"]:
-        bits = [f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
+        bits = [cal_bit(cal),
+                f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
                 f"{len(g['job'])} job" if g["job"] else "",
                 f"{len(g['reply'])} to reply" if g["reply"] else "",
                 f"{len(g['read'])} to read" if g["read"] else ""]
         return f"Mail summary {stamp}: " + ", ".join(b for b in bits if b)
-    return f"Mail summary {stamp}: nothing needs you ({total} routine)"
+    return f"Mail summary {stamp}: {lead}nothing needs you ({total} routine)"
 
 
 GROUPS = [  # (key, heading, colour)
@@ -143,10 +174,25 @@ def job_line(j) -> str:
     return ", ".join(x for x in (j["title"], j["company"], j["location"], closing) if x)
 
 
-def build_text(rows: list, jobs: list = (), notes: list = ()) -> str:
+def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
     """Plain-text version, for mail apps that don't show HTML."""
     g = sections(rows)
     out = [f"{len(rows)} new emails since the last summary", ""]
+    if cal and cal["events"] is not None:  # first: the shape of the day
+        if cal["events"]:
+            out += [f"{cal_heading(cal).upper()} ({len(cal['events'])})", "-" * 30]
+            for ev in cal["events"]:
+                out += [f"* {agenda.when(ev, cal['day'])}  {ev['title']}"] + \
+                       ([f"  Prepare: {ev['prep']}"] if ev["important"] and ev["prep"] else [])
+            out += [""]
+        else:
+            out += [f"{cal_heading(cal).upper()}: nothing on the calendar", ""]
+        if cal["upcoming"]:
+            out += [f"COMING UP, NEEDS PREPARING ({len(cal['upcoming'])})", "-" * 30]
+            for ev in cal["upcoming"]:
+                out += [f"* {ev['start']:%a %-d %b} ({agenda.days_away(ev, cal['day'])}), "
+                        f"{agenda.when(ev, ev['start'].date())}  {ev['title']}"] + \
+                       ([f"  Prepare: {ev['prep']}"] if ev["prep"] else []) + [""]
     if jobs:
         out += [f"JOBS WORTH APPLYING TO ({len(jobs)})", "-" * 30]
         for j in jobs:
@@ -172,12 +218,12 @@ def build_text(rows: list, jobs: list = (), notes: list = ()) -> str:
         out.append(f"Everything else: {routine}.")
     if moved_line(rows):
         out.append(moved_line(rows))
-    out += list(notes)   # e.g. the weekly labelling check (milestone 7)
+    out += list(notes) + cal_note(cal)   # e.g. the weekly labelling check (milestone 7)
     out.append("\nLabelled by Claude. Nothing was deleted or sent.")
     return "\n".join(out)
 
 
-def build_html(rows: list, jobs: list = (), notes: list = ()) -> str:
+def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
     """The nicer version. Styles are inline because many mail apps strip <style> blocks.
 
     Every piece of email text goes through html.escape(): a sender could put HTML
@@ -197,7 +243,34 @@ def build_html(rows: list, jobs: list = (), notes: list = ()) -> str:
     chips = chips or chip("Nothing needs you", "#6b7280")
 
     body = []
-    if jobs:  # first: the point of the whole job hunt
+    if cal and cal["events"] is not None:  # first: the shape of the day
+        slate = "#475569"
+        n = f" &middot; {len(cal['events'])}" if cal["events"] else ""
+        body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {slate};'
+                    f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
+                    f'color:{slate}">{e(cal_heading(cal))}{n}</div>')
+        def event_row(when_txt, ev, time_txt=""):
+            prep = (f'<div style="font-size:13px;color:#b45309;margin-top:3px">Prepare: {e(ev["prep"])}</div>'
+                    if ev["important"] and ev["prep"] else "")
+            return ('<div style="padding:8px 0 8px 14px;border-bottom:1px solid #eef0f2;font-size:15px">'
+                    f'<span style="display:inline-block;min-width:120px;font-weight:600;color:#111827">'
+                    f'{e(when_txt)}</span>'
+                    f'<span style="color:#111827">{e(time_txt + " " if time_txt else "")}'
+                    f'{e(ev["title"] or "(no title)")}</span>{prep}</div>')
+        for ev in cal["events"]:
+            body.append(event_row(agenda.when(ev, cal["day"]), ev))
+        if not cal["events"]:
+            body.append('<div style="padding:8px 0 8px 14px;font-size:14px;color:#6b7280">'
+                        'Nothing on the calendar.</div>')
+        if cal["upcoming"]:
+            amber = "#b45309"
+            body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {amber};'
+                        f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
+                        f'color:{amber}">Coming up, needs preparing &middot; {len(cal["upcoming"])}</div>')
+            for ev in cal["upcoming"]:
+                body.append(event_row(f"{ev['start']:%a %-d %b}, {agenda.days_away(ev, cal['day'])}", ev,
+                                      agenda.when(ev, ev["start"].date())))
+    if jobs:  # then: the point of the whole job hunt
         teal = "#0d9488"
         body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {teal};'
                     f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
@@ -256,7 +329,7 @@ def build_html(rows: list, jobs: list = (), notes: list = ()) -> str:
     footer = (f'<div style="margin-top:22px;padding:12px 14px;border-radius:8px;background:#f6f7f9;'
               f'font-size:13px;color:#4b5563">Everything else: {routine or "none"}'
               + (f'<div style="margin-top:4px">{e(moved_line(rows))}</div>' if moved_line(rows) else "")
-              + "".join(f'<div style="margin-top:4px">{e(n)}</div>' for n in notes)
+              + "".join(f'<div style="margin-top:4px">{e(n)}</div>' for n in list(notes) + cal_note(cal))
               + '</div>')
     stamp = datetime.now().strftime("%a %d %b &middot; %H:%M")
 
@@ -334,20 +407,21 @@ def summarise():
         except Exception as e:  # nor a moving problem
             print(f"Clean-up FAILED (summary unaffected): {e}")
 
+    cal = agenda.get(db)   # Calendar.app, read-only; mornings only; never raises
     recent, too_old = pending(db)
     jobs = screener.unshown_high(db)
     if too_old and not args.sample:
         print(f"{len(too_old)} older emails skipped (over {MAX_AGE_HOURS}h old)")
-    if not recent and not jobs:
+    if not recent and not jobs and not has_cal(cal):
         print("No new emails: no summary this time.")
         if args.live and not args.sample:
             mark_done(db, too_old)
             notify.ping(ping_counts(recent), 0, DELIVER_TO)  # still ping: silence would mean "broken"
         return (None if args.sample else db), args.live
 
-    subject = subject_line(sections(recent), len(recent), jobs)
+    subject = subject_line(sections(recent), len(recent), jobs, cal)
     notes = learn.unshown_lines(db)
-    text, html_body = build_text(recent, jobs, notes), build_html(recent, jobs, notes)
+    text, html_body = build_text(recent, jobs, notes, cal), build_html(recent, jobs, notes, cal)
     print(f"\nSubject: {subject}\n\n{text}\n")
 
     preview = paths.PREVIEW
