@@ -63,6 +63,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `agenda.py` | Reads macOS Calendar (read-only) for the 08:00 summary: today's events, plus anything in the next 7 days that needs preparing. Claude judges each event once (true/false + a prep note), so most mornings make no Claude call |
 | `watch.py` | The 15-minute check: new job or needs-reply mail → draft → instant counts-only ping. No new mail = no Claude call |
 | `runlock.py` | Makes sure the quick check and the summary never run at the same time |
+| `slots.py` | Records whether each 08:00 / 18:00 summary was delivered, so the quick check can run a missed one (catch-up) |
 | `gate.py`, `grow_testset.py` | The keep-or-reject check for instruction changes; picking old job-season emails for me to label |
 | `learn.py` | Notices my corrections (rescued from Review, moved to junk, replied when Claude said no reply), turns them into sender rules, and runs the weekly accuracy check |
 | `unsub_folder.py` | Each quick check: emails I dragged into an `Unsubscribe` folder get the RFC 8058 one-click unsubscribe (or a reason to do it by hand), then move to Review |
@@ -97,6 +98,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **A sender could fake my provider's verdict.** The code trusted a "DKIM passed" stamp from any of Yahoo, Google or iCloud. Each provider deletes fakes in its *own* name (RFC 8601 s5), but not in another provider's, so a fake "Yahoo says passed" in mail to Gmail counted. Now the provider that wrote the *first* stamp is the receiver (RFC 8601: it must be added at the top), and only its stamps count. Checked against 74 real one-click emails: none changed. A first attempt ("only the unbroken top block") broke every iCloud email, because iCloud puts other lines between its six stamps.
 - **Google doesn't follow the header format.** The standard wraps unsubscribe links in `<...>`; Google sends them bare. The first real dry run listed Google Health as "no unsubscribe header" until the parser accepted both.
 - **A sleeping Mac skips checks.** `launchd`'s `StartInterval` drops a check that falls due while the Mac is asleep (it says so in `man launchd.plist`), unlike the calendar schedule, which runs on wake. The quick check looks back 3 hours, and the summary 26, so nothing is lost.
+- **"Runs on wake" isn't enough on battery.** A sleeping MacBook wakes for ~20 seconds at a time with no network (a "dark wake"). launchd fired the missed 08:00 summary in one, the Mac slept mid-run, and the run died on a DNS error. launchd never retries, so that morning had no summary and no ping. Now every summary run is recorded, and the 15-minute check runs a summary that is 10+ minutes overdue. Network errors are retried at every check; 3 real failures send one ping and stop until the next summary.
 - **Retries can burn quota.** An email that keeps failing would be retried by a 15-minute job 96 times a day. The quick check only labels the last 3 hours and only drafts what it's alerting about; the twice-daily summary retries the rest.
 - **Calendar's date search misses repeating events.** Asking Calendar.app for one day's events only returns a repeating event on its first date, so a weekly class would vanish after week one. The summary reads every event with its repeat rule and works out the dates itself (~90 s, fine once a day). Single changed dates needed a real test event: a cancelled date is listed in the event's `excluded dates`; a moved date is an extra copy with the same ID at its new time, visible only when all events are read in one go (asking one by one returns the series' details for every copy). A failed read is printed in the summary, so a blank calendar never looks like a free day.
 - **The first real correction found itself.** On its first look at my Sent folders, the learning step found I'd replied to a game-prize email Claude had marked "no reply needed".
@@ -160,6 +162,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 6 | Instant alert for recruiter and interview mail (every 15 min) | ✓ |
 | 7 | Learns from my corrections, re-measured weekly (prompt examples and reply style once ~10 corrections exist) | ✓ |
 | 8 | Calendar in the 08:00 summary: today, plus a 7-day countdown for events that need preparing | ✓ |
+| 8.5 | Catch-up: a summary missed while the Mac slept is run at the next quick check | ✓ |
 
 ## How this was built
 

@@ -149,6 +149,14 @@ CREATE TABLE IF NOT EXISTS unsub_requests (
     done_at TEXT DEFAULT (datetime('now')),
     shown INTEGER DEFAULT 0            -- 1 = already listed in a summary
 );
+CREATE TABLE IF NOT EXISTS summary_runs (   -- slots.py: was each 08:00/18:00 summary delivered?
+    slot TEXT NOT NULL,                -- the scheduled time this run belongs to (local, ISO)
+    started TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    error TEXT,                        -- error type + short message only, never email content
+    network INTEGER DEFAULT 0,         -- 1 = failed for lack of network (doesn't count towards giving up)
+    via TEXT                           -- digest (scheduled or by hand) / catch-up
+);
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     label TEXT NOT NULL,

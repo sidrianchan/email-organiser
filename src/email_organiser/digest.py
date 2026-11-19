@@ -19,11 +19,12 @@ mailbox. It is NOT sent. There is still no sending code anywhere (design rule 2)
 import argparse
 import html
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import agenda, cleanup, drafts, learn, notify, paths, screener, store, unsub_folder
+from . import agenda, cleanup, drafts, learn, notify, paths, screener, slots, store, unsub_folder
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -367,55 +368,82 @@ def mark_done(db, rows: list) -> None:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(line_buffering=True)   # keep the log in order (errors aren't buffered, prints were)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--live", action="store_true", help="really deliver the summary")
+    parser.add_argument("--sample", action="store_true",
+                        help="preview with the last 48h of mail; never marks anything as summarised")
+    parser.add_argument("--force", action="store_true",
+                        help="run even if this 08:00/18:00 summary was already delivered")
+    args = parser.parse_args()
     # Wait for a running 15-minute check to finish (up to 15 min), so the two never label or
     # draft the same email. If it's somehow still running, go ahead: a late summary is worse.
     with run_lock(wait_seconds=900) as got:
         if not got:
             print("quick check still running after 15 min: summarising anyway")
-        summarise()
+        if args.live and not args.sample:
+            summarise_recorded("digest", force=args.force)
+        else:
+            summarise(args.live, args.sample)
 
 
-def summarise():
-    """The summary run. Returns (database, live); database is None for a --sample preview."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--live", action="store_true", help="really deliver the summary")
-    parser.add_argument("--sample", action="store_true",
-                        help="preview with the last 48h of mail; never marks anything as summarised")
-    args = parser.parse_args()
-    mode = ("LIVE" if args.live else "dry run") + (" sample" if args.sample else "")
+def summarise_recorded(via: str, now: datetime | None = None, force: bool = False) -> bool:
+    """A real summary, recorded in summary_runs (slots.py) so a missing one can be caught up.
+    Skips if this slot's summary was already delivered (e.g. the 15-minute check caught it up
+    first). Returns True if it ran; a failure is recorded, then raised as before."""
+    now = now or datetime.now()
+    slot = slots.current_slot(now)
+    db = store.open_db()
+    if not force and slots.done(db, slot):
+        print(f"=== {now:%Y-%m-%d %H:%M} digest (LIVE) === the {slot:%H:%M} summary was already "
+              f"delivered: nothing to do (--force runs it anyway)")
+        return False
+    try:
+        summarise(live=True, sample=False, slot=slot)
+    except Exception as e:
+        slots.record(db, slot, now, via, error=e)
+        raise
+    slots.record(db, slot, now, via)
+    return True
+
+
+def summarise(live: bool, sample: bool, slot: datetime | None = None):
+    """The summary run. Returns (database, live); database is None for a --sample preview.
+    `slot` is the 08:00/18:00 it belongs to: it decides whether the calendar is included."""
+    mode =("LIVE" if live else "dry run") + (" sample" if sample else "")
     print(f"=== {datetime.now():%Y-%m-%d %H:%M} digest ({mode}) ===")
 
     db = store.open_db()
-    if args.sample:
+    if sample:
         db.execute("CREATE TEMP TABLE digested AS SELECT * FROM main.digested WHERE 0")  # pretend nothing was summarised
     else:
         fetch_new(db, LOOKBACK_HOURS, show=False)
-        learn.step(db, live=args.live)   # corrections -> rules BEFORE labelling and moving; never raises
+        learn.step(db, live=live)   # corrections -> rules BEFORE labelling and moving; never raises
         classify_pending(db)
         try:
-            screener.run(db, live=args.live)
+            screener.run(db, live=live)
         except Exception as e:  # a screening problem must never stop the summary
             print(f"Screener FAILED (summary unaffected): {e}")
         try:
-            drafts.make_drafts(db, live=args.live)
+            drafts.make_drafts(db, live=live)
         except Exception as e:  # a drafting problem must never stop the summary
             print(f"Drafts FAILED (summary unaffected): {e}")
         try:
-            cleanup.run(db, live=args.live)
+            cleanup.run(db, live=live)
         except Exception as e:  # nor a moving problem
             print(f"Clean-up FAILED (summary unaffected): {e}")
 
-    cal = agenda.get(db)   # Calendar.app, read-only; mornings only; never raises
+    cal = agenda.get(db, now=slot)   # Calendar.app, read-only; mornings only (by slot, so a late 08:00 still has it); never raises
     recent, too_old = pending(db)
     jobs = screener.unshown_high(db)
-    if too_old and not args.sample:
+    if too_old and not sample:
         print(f"{len(too_old)} older emails skipped (over {MAX_AGE_HOURS}h old)")
     if not recent and not jobs and not has_cal(cal):
         print("No new emails: no summary this time.")
-        if args.live and not args.sample:
+        if live and not sample:
             mark_done(db, too_old)
             notify.ping(ping_counts(recent), 0, DELIVER_TO)  # still ping: silence would mean "broken"
-        return (None if args.sample else db), args.live
+        return (None if sample else db), live
 
     subject = subject_line(sections(recent), len(recent), jobs, cal)
     notes = learn.unshown_lines(db) + unsub_folder.unshown_lines(db)
@@ -424,9 +452,9 @@ def summarise():
 
     preview = paths.PREVIEW
     preview.write_text(f"<!doctype html><meta charset='utf-8'><body style='background:#fff'>{html_body}")
-    if args.live:
+    if live:
         deliver(subject, text, html_body)
-        if not args.sample:
+        if not sample:
             mark_done(db, recent + too_old)  # only after delivery worked
             screener.mark_shown(db, jobs)
             learn.mark_shown(db)
@@ -437,9 +465,9 @@ def summarise():
         print(f"(dry run: nothing delivered. HTML preview: {preview})")
         text, loud = notify.message(ping_counts(recent, jobs), len(recent), DELIVER_TO)
         print(f"(dry run: Telegram ping not sent; it would say: {text}{'' if loud else '  [no sound]'})")
-        if args.sample:
+        if sample:
             subprocess.run(["open", str(preview)])  # show it in your browser
-    return (None if args.sample else db), args.live
+    return (None if sample else db), live
 
 
 if __name__ == "__main__":

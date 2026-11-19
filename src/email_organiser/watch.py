@@ -17,11 +17,15 @@ Rules:
   * 23:00-08:00 the ping is silent (still sent, no sound)
   * the ping says how many and which account, never who or what (Telegram isn't end-to-end encrypted)
   * if the summary is running, this check skips its turn (runlock.py)
+  * catch-up (slots.py): if the 08:00 / 18:00 summary is 10+ minutes overdue and was never
+    delivered (e.g. the Mac woke briefly with no network and the run crashed), run it first.
+    No network = try again next check; 3 real failures = one ping, then stop until the next one.
 """
 import argparse
+import sys
 from datetime import datetime, timedelta, timezone
 
-from . import drafts, notify, store, unsub_folder
+from . import digest, drafts, notify, slots, store, unsub_folder
 from .classify import classify_pending
 from .fetch import fetch_new
 from .runlock import run_lock
@@ -112,6 +116,7 @@ def check(db, live: bool, now: datetime | None = None) -> int:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(line_buffering=True)   # keep the log in order (errors aren't buffered, prints were)
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="really write drafts and ping")
     live = parser.parse_args().live
@@ -120,7 +125,35 @@ def main() -> None:
         if not got:
             print("summary is running: skipping this check")
             return
-        check(store.open_db(), live)
+        db = store.open_db()
+        if live:
+            catch_up(db, datetime.now())
+        check(db, live)
+
+
+def catch_up(db, now: datetime) -> bool:
+    """If the 08:00 or 18:00 summary is due but wasn't delivered (the Mac asleep, no network,
+    a crash), run it now. Never raises, so the quick check below still runs. Returns True
+    if a summary was delivered."""
+    slot = slots.catch_up_due(db, now)
+    if slot is None:
+        return False
+    print(f"The {slot:%H:%M} summary hasn't been delivered: running it now")
+    try:
+        return digest.summarise_recorded("catch-up", now=now)
+    except Exception as e:   # already recorded in summary_runs by summarise_recorded
+        print(f"Catch-up summary FAILED: {type(e).__name__}: {e}")
+        if slots.is_network(e):
+            print("(no network: will try again at the next check)")
+        elif slots.failures(db, slot) >= slots.MAX_FAILS:
+            give_up = (f"The {slot:%H:%M} summary failed {slots.MAX_FAILS} times ({type(e).__name__}). "
+                       f"No more retries until the next one; details in watch.log.")
+            try:
+                notify.send(give_up, True)
+                print(f"Telegram ping sent: {give_up}")
+            except Exception as ping_error:
+                print(f"Telegram ping FAILED: {ping_error}")
+        return False
 
 
 if __name__ == "__main__":
