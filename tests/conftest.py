@@ -1,7 +1,16 @@
 """Shared test setup."""
-import pytest
+import os
+import tempfile
 
-from email_organiser import agenda
+# Tests never touch ~/.email-organiser: not the real database, run lock, backups or preview.
+# (21 Nov: before this, tests that ran a summary took the real run lock, so two live quick
+# checks skipped their turn, and one wrote a test database into the real backups folder.)
+# Set before the package is imported, because paths.py reads it at import time.
+os.environ["EMAIL_ORGANISER_HOME"] = tempfile.mkdtemp(prefix="email-organiser-tests-")
+
+import pytest  # noqa: E402
+
+from email_organiser import agenda  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

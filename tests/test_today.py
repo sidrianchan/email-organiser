@@ -458,3 +458,9 @@ def test_formatting_trouble_falls_back_to_plain_text(monkeypatch, tmp_path):
 def test_brief_weather_is_one_short_line():
     w = {"forecast": weather.forecast_for(FND, SAT), "warnings": []}
     assert weather.line(w, brief=True) == "13–21°C · Mainly cloudy · rain chance low"
+
+
+def test_tests_never_touch_the_real_data_folder():
+    from email_organiser import paths
+    assert "email-organiser-tests-" in str(paths.HOME)
+    assert paths.BACKUPS.parent == paths.HOME and str(store.DB_PATH).startswith(str(paths.HOME))
