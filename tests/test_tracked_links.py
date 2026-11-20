@@ -49,3 +49,22 @@ def test_network_error_means_no_link(monkeypatch):
             raise OSError("offline")
     monkeypatch.setattr(screener.urllib.request, "build_opener", lambda *h: Opener())
     assert screener.resolve_tracked(TRACK, QM) == ""
+
+
+def test_rubric_fields_are_stored(tmp_path, monkeypatch):
+    from email_organiser import store
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "t.db")
+    db = store.open_db()
+    row = {"account": "yahoo", "uidvalidity": 1, "uid": 1}
+    job = {"title": "Data Analyst", "company": "Acme", "location": "HK", "closing": "", "fit": "medium",
+           "reason": "Needs Tableau", "url": "", "commission": False, "level": "junior",
+           "gap": "\"Tableau required\"", "row": row}
+    screener.save(db, [{"row": row}], [job])
+    got = db.execute("SELECT level, gap FROM jobs").fetchone()
+    assert tuple(got) == ("junior", "\"Tableau required\"")
+
+
+def test_rubric_asks_for_level_and_gap_before_fit():
+    props = list(screener.SCHEMA["properties"]["emails"]["items"]["properties"]["jobs"]["items"]["properties"])
+    assert props.index("level") < props.index("gap") < props.index("fit")
+    assert "never guess a gap" in screener.SYSTEM_PROMPT

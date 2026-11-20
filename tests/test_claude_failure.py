@@ -169,5 +169,8 @@ def test_each_step_uses_its_model(monkeypatch):
     import inspect
     from email_organiser import agenda, drafts, screener
     assert "model=LABEL_MODEL" in inspect.getsource(agenda.judge if hasattr(agenda, "judge") else agenda)
-    for mod in (drafts, screener):   # no override: they get the default, Opus
-        assert "model=" not in inspect.getsource(mod)
+    assert "model=" not in inspect.getsource(drafts)   # no override: the default, Opus
+    seen = []
+    monkeypatch.setattr(screener, "run_claude", lambda p, s, sc, model=None: (seen.append(model), ({"emails": []}, "m"))[1])
+    screener.screen([{"row": {"sender": "a@b.example", "subject": "s"}, "text": "x", "links": {}}], "profile")
+    assert seen == [None]   # the live screener passes no model: run_claude's default, Opus
