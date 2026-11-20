@@ -146,7 +146,7 @@ FAR = ("plan", "Final interview", "2026-11-30T10:00:00", "2026-11-30T11:00:00", 
 
 
 def fake_claude(calls, important_titles=("Written exam",)):
-    def run(prompt, system, schema):
+    def run(prompt, system, schema, model=None):
         events = json.loads(prompt.split("\n", 1)[1])
         calls.append([ev["title"] for ev in events])
         return {"events": [dict(id=ev["id"], important=ev["title"] in important_titles,
@@ -182,7 +182,7 @@ def test_each_event_is_judged_once(db, monkeypatch):
 
 
 def test_judging_failure_is_said_and_retried(db, monkeypatch):
-    def down(*a):
+    def down(*a, **k):
         raise RuntimeError("claude is down")
     monkeypatch.setattr(agenda, "read_raw", lambda: raw(LESSON, EXAM))
     monkeypatch.setattr(agenda, "run_claude", down)

@@ -27,7 +27,7 @@ from datetime import date, datetime, time, timedelta
 
 from dateutil.rrule import rrulestr
 
-from .classify import run_claude
+from .classify import LABEL_MODEL, run_claude
 
 LOOKAHEAD_DAYS = 7     # important events show every morning from this many days before
 SKIP = ["Siri Suggestions", "Scheduled Reminders", "Birthdays"]  # Apple's generated calendars
@@ -199,7 +199,8 @@ def judge(db, events: list[dict]) -> bool:
                                else f"{ev['start']:%a %d %b %Y %H:%M}-{ev['end']:%H:%M}")
                           for i, ev in enumerate(new)], ensure_ascii=False, indent=1)
     try:
-        answer, model = run_claude(f"Judge these calendar events:\n{payload}", SYSTEM_PROMPT, SCHEMA)
+        answer, model = run_claude(f"Judge these calendar events:\n{payload}", SYSTEM_PROMPT, SCHEMA,
+                                   model=LABEL_MODEL)
     except Exception as e:
         print(f"Calendar judging FAILED (summary unaffected): {e}")
         return False

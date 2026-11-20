@@ -153,3 +153,21 @@ def test_summary_run_replays_20_nov(db, monkeypatch, capsys, tmp_path):
     assert pings[-1][1] and "1 not labelled" in pings[-1][0]          # summary ping, loud
     recent, _ = digest.pending(db)
     assert len(recent) == 1   # not marked as summarised: comes back once labelled
+
+
+def test_each_step_uses_its_model(monkeypatch):
+    """Labelling and calendar on Sonnet (measured 20 Nov); screener and drafts on Opus (not measured)."""
+    used = []
+    def run(command, **kwargs):
+        used.append(command[command.index("--model") + 1])
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(
+            {"structured_output": {"labels": [], "ok": True}, "modelUsage": {}}), stderr="")
+    monkeypatch.setattr(classify.subprocess, "run", run)
+    classify.ask_claude([])
+    assert used == [classify.LABEL_MODEL] and "sonnet" in classify.LABEL_MODEL
+    assert "opus" in classify.MODEL
+    import inspect
+    from email_organiser import agenda, drafts, screener
+    assert "model=LABEL_MODEL" in inspect.getsource(agenda.judge if hasattr(agenda, "judge") else agenda)
+    for mod in (drafts, screener):   # no override: they get the default, Opus
+        assert "model=" not in inspect.getsource(mod)

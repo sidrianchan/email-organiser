@@ -15,9 +15,13 @@ from . import store
 from .labels import JOB_ALERT_RULE, NAMES, REPLY_RULE, describe
 
 BATCH_SIZE = 20  # emails per Claude call: fewer calls = less of your Pro usage
-# Which Claude every call uses. Pinned (20 Nov): unpinned, it followed the account default and
-# switched from Sonnet to Opus on 19 Nov without anyone deciding to. Set after measuring both.
-MODEL = "claude-opus-5-5"
+# Which Claude each step uses. Pinned (20 Nov): unpinned, it followed the account default and
+# switched from Sonnet to Opus on 19 Nov without anyone deciding to.
+# Measured 20 Nov on the 87 hand labels, 3 runs each: job emails 19/19 for both models; Sonnet got
+# 2 routine emails wrong that Opus got right. Labelling runs every 15 min, so it uses most of the
+# Pro allowance: Sonnet. The screener and drafts aren't measured (no answer key), so they stay Opus.
+MODEL = "claude-opus-5-5"          # default: job screener, reply drafts
+LABEL_MODEL = "claude-sonnet-5-5"  # labelling, calendar judging, health check
 
 SYSTEM_PROMPT = f"""You sort emails for one person: a recent graduate job hunting in Hong Kong and London.
 
@@ -106,7 +110,7 @@ def health_check() -> str | None:
     The summary runs this first, so a logged-out Claude is reported, not silently skipped."""
     schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
     try:
-        run_claude("Reply with ok = true.", "Answer in the requested shape.", schema)
+        run_claude("Reply with ok = true.", "Answer in the requested shape.", schema, model=LABEL_MODEL)
         return None
     except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
         return str(e)
@@ -116,7 +120,7 @@ def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
     """Send one batch to Claude. Return ({id: {"label", "reason"}}, model name)."""
     # json.dumps wraps the email text as data, with clear start and end marks.
     payload = json.dumps(emails, ensure_ascii=False, indent=1)
-    answer, model = run_claude(f"Label these emails:\n{payload}", SYSTEM_PROMPT, SCHEMA)
+    answer, model = run_claude(f"Label these emails:\n{payload}", SYSTEM_PROMPT, SCHEMA, model=LABEL_MODEL)
     return {item["id"]: item for item in answer["labels"]}, model
 
 
