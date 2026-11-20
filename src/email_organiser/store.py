@@ -142,6 +142,46 @@ CREATE TABLE IF NOT EXISTS event_flags (
     important INTEGER, prep TEXT, model TEXT,
     judged_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS applications (   -- pipeline.py: one row per job application
+    id INTEGER PRIMARY KEY,
+    company TEXT NOT NULL, title TEXT,
+    stage TEXT NOT NULL,                     -- would_apply/applied/viewed/assessment/interview/offer/rejected
+    posting_closed INTEGER DEFAULT 0,        -- the ad closed; the application may still count
+    deadline TEXT, action TEXT,              -- the latest thing to do, and by when (only if an email said)
+    action_since TEXT, action_done_at TEXT,  -- when that step was asked for; when you tapped Done
+    source TEXT, job_key TEXT,               -- where it came from; the screened job, if any
+    snoozed_until TEXT,                      -- apply queue: "Not now" hides it until this date
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS queue_messages (   -- apply_queue.py: one morning message a day
+    day TEXT PRIMARY KEY, message_id INTEGER, app_ids TEXT
+);
+CREATE TABLE IF NOT EXISTS todo_messages (   -- a summary ping with Done buttons for job to-dos
+    message_id INTEGER PRIMARY KEY, app_ids TEXT,
+    sent_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS application_events (   -- every change, with the email behind it (undo)
+    id INTEGER PRIMARY KEY,
+    application_id INTEGER NOT NULL,
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    old_stage TEXT, new_stage TEXT, posting_closed INTEGER, deadline TEXT, detail TEXT,
+    at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS job_reads (   -- pipeline.py: Claude's reading of one job email
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    company TEXT, role TEXT, stage TEXT, posting_closed INTEGER,
+    action_needed INTEGER, action TEXT, deadline TEXT,
+    application_id INTEGER, model TEXT,
+    read_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
+CREATE TABLE IF NOT EXISTS my_actions (   -- your answer for the pipeline gate: must you act on it?
+    account TEXT, uidvalidity INTEGER, uid INTEGER,
+    action INTEGER NOT NULL,
+    labelled_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (account, uidvalidity, uid)
+);
 CREATE TABLE IF NOT EXISTS short_titles (   -- shorten.py: a long event/reminder title, said briefly
     kind TEXT NOT NULL,                      -- event / reminder / prep
     original TEXT NOT NULL,
@@ -201,6 +241,9 @@ def open_db() -> sqlite3.Connection:
     _add_column_if_missing(db, "jobs", "gap", "TEXT")     # the requirement he may not meet, or ""
     _add_column_if_missing(db, "jobs", "employer_size", "TEXT")   # large/small/unknown: orders the high list
     _add_column_if_missing(db, "drafts", "body", "TEXT")   # milestone 7: compare with what you sent
+    _add_column_if_missing(db, "applications", "snoozed_until", "TEXT")   # apply queue "Not now" (21 Nov)
+    _add_column_if_missing(db, "applications", "action_since", "TEXT")    # job to-dos (21 Nov)
+    _add_column_if_missing(db, "applications", "action_done_at", "TEXT")
     return db
 
 

@@ -8,7 +8,9 @@ For each email you give a type (a number) and then answer: needs a reply? (y/n)
 
 It first finishes any emails you labelled before the reply question existed,
 then continues with new ones. With --pool it labels only the old job-season emails
-picked by grow_testset.py (milestone 7b), shuffled, until all are done. It never shows Claude's answer: if you could see
+picked by grow_testset.py (milestone 7b), shuffled, until all are done. With --actions
+(milestone 9) you answer one question per job email: must you DO something because of it?
+That's the answer key for the job pipeline's gate (pipeline.py --gate). It never shows Claude's answer: if you could see
 Claude's guess you'd tend to agree with it (anchoring), and the test would end up
 measuring Claude against itself. Stop any time with q; progress is saved.
 """
@@ -80,11 +82,55 @@ def label_pool(db) -> None:
     print(f"\nPool: {done}/{total} labelled. Stop and resume any time.")
 
 
+def label_actions(db) -> None:
+    """Milestone 9: every job email (Claude's or yours), shuffled, one question: must you act?
+    Blind like the rest: the pipeline's answer is never shown."""
+    rows = db.execute("""
+        SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.snippet
+        FROM messages m
+        LEFT JOIN my_actions a USING (account, uidvalidity, uid)
+        WHERE a.uid IS NULL AND (
+            EXISTS (SELECT 1 FROM claude_labels c WHERE c.account = m.account AND c.uidvalidity = m.uidvalidity
+                    AND c.uid = m.uid AND c.label = 'job')
+            OR EXISTS (SELECT 1 FROM my_labels t WHERE t.account = m.account AND t.uidvalidity = m.uidvalidity
+                       AND t.uid = m.uid AND t.label = 'job'))
+        ORDER BY m.account, m.uid""").fetchall()
+    from .unsubscribe import is_example
+    rows = [r for r in rows if not is_example(store.sender_address(r["sender"]))]   # planted test emails
+    random.Random(9).shuffle(rows)
+    done = db.execute("SELECT COUNT(*) FROM my_actions").fetchone()[0]
+    print(f"{len(rows)} job emails to answer ({done} done).")
+    print("Must YOU do something because of this email? An assessment to complete, a time to book or")
+    print("confirm, documents or information to send, a person to reply to, an offer to answer.")
+    print("Status news (received, viewed, ad closed, rejected) is 'n', even good news.\n")
+    for r in rows:
+        show(r)
+        while True:
+            choice = input("Must you act? y / n / s(kip) / q: ").strip().lower()
+            if choice in ("y", "n", "s", "q"):
+                break
+        if choice == "q":
+            break
+        if choice == "s":
+            continue
+        db.execute("INSERT OR REPLACE INTO my_actions (account, uidvalidity, uid, action) VALUES (?, ?, ?, ?)",
+                   (r["account"], r["uidvalidity"], r["uid"], 1 if choice == "y" else 0))
+        db.commit()
+        done += 1
+        print(f"  -> {'action' if choice == 'y' else 'news'}  ({done} done)")
+    print(f"\n{done} answered. Stop and resume any time. Then: python -m email_organiser.pipeline --gate")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pool", action="store_true", help="label the old job-season emails (7b)")
-    pool = parser.parse_args().pool
+    parser.add_argument("--actions", action="store_true", help="must you act on each job email? (milestone 9)")
+    args = parser.parse_args()
+    pool = args.pool
     db = store.open_db()
+    if args.actions:
+        label_actions(db)
+        return
     print(describe())
     print(f"\nNeeds a reply: {REPLY_RULE}\n")
     if pool:

@@ -133,6 +133,12 @@ def handle(db, update: dict, chat_id: int) -> tuple[str, dict] | None:
     if q.get("from", {}).get("id") != chat_id:   # someone else pressing a forwarded button
         return q["id"], {"text": "Not yours to mark."}
     parts = (q.get("data") or "").split(":")
+    if len(parts) == 2 and parts[0] == "d" and parts[1].isdigit():   # Done on a job to-do (21 Nov)
+        return q["id"], done_tap(db, int(parts[1]), q.get("message", {}))
+    if len(parts) == 3 and parts[0] == "q" and parts[2].isdigit():   # the apply queue (milestone 9)
+        from . import apply_queue
+        said, markup = apply_queue.tap(db, parts[1], int(parts[2]), q.get("message", {}).get("message_id"))
+        return q["id"], {"text": said, "markup": markup, "message": q.get("message", {})}
     if len(parts) != 3 or parts[0] != "j" or not parts[2].isdigit():
         return q["id"], {}
     verdict = record(db, parts[1], int(parts[2]))
@@ -140,6 +146,20 @@ def handle(db, update: dict, chat_id: int) -> tuple[str, dict] | None:
         return q["id"], {"text": "Couldn't find that job."}
     return q["id"], {"text": f"Saved: {VERDICTS[parts[1]][1]}", "verdict": verdict, "msg_id": int(parts[2]),
                      "message": q.get("message", {})}
+
+
+def done_tap(db, app_id: int, message: dict) -> dict:
+    """A to-do's Done button: stop reminding, and redraw the buttons on that message."""
+    import json
+    from . import pipeline
+    if app_id == 0:   # an already-done button
+        return {}
+    marked = pipeline.mark_done(db, app_id)
+    row = db.execute("SELECT app_ids FROM todo_messages WHERE message_id = ?",
+                     (message.get("message_id"),)).fetchone()
+    markup = pipeline.todo_keyboard(db, json.loads(row["app_ids"])) if row else None
+    return {"text": "Marked done: no more reminders" if marked else "Already done", "markup": markup,
+            "message": message}
 
 
 def collect(db) -> int:
@@ -162,7 +182,16 @@ def collect(db) -> int:
                     notify.call(token, "answerCallbackQuery", {"callback_query_id": qid, "text": ans.get("text", "")})
                 except Exception:
                     pass
-                if "verdict" in ans:
+                if ans.get("markup") and ans["message"].get("message_id"):   # an apply-queue tap
+                    stored += 1
+                    try:
+                        notify.call(token, "editMessageReplyMarkup", {
+                            "chat_id": chat_id, "message_id": ans["message"]["message_id"],
+                            "reply_markup": ans["markup"]})
+                    except RuntimeError as e:
+                        if "not modified" not in str(e):
+                            raise
+                elif "verdict" in ans:
                     stored += 1
                     m = ans["message"]
                     if m.get("message_id"):   # tick the chosen button

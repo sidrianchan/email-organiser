@@ -68,3 +68,14 @@ def no_real_title_shortening(monkeypatch):
     from email_organiser import shorten
     monkeypatch.setattr(shorten, "run_claude",
                         lambda *a, **k: pytest.fail("tests must not call Claude to shorten titles"))
+
+
+@pytest.fixture(autouse=True)
+def no_real_job_pipeline_reads(monkeypatch):
+    """The job pipeline's reading of job emails is a real Claude call. Tests never make it: by
+    default it fails, so the checks fall back to pinging every job email (the safe behaviour).
+    A test that wants readings patches pipeline.run_claude itself."""
+    from email_organiser import pipeline
+    def no_claude(*a, **k):
+        raise RuntimeError("no Claude in tests")
+    monkeypatch.setattr(pipeline, "run_claude", no_claude)

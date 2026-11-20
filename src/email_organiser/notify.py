@@ -75,6 +75,8 @@ def mail_line(counts: dict, total: int, account: str) -> tuple[str, bool]:
     bits = [f"⚠️ {failed} not labelled (Claude failed: run /login)" if failed else "",
             f"{good} good job{'s' if good > 1 else ''}" if good else "",
             f"{counts['job']} job" if counts["job"] else "",
+            f"{counts.get('updates', 0)} job update{'s' if counts.get('updates', 0) > 1 else ''}"
+            if counts.get("updates") else "",   # status news (milestone 9): listed, never a sound
             f"{counts['reply']} to reply" if counts["reply"] else "",
             f"{counts['read']} to read" if counts["read"] else ""]
     bits = [b for b in bits if b]
@@ -105,37 +107,41 @@ def call(token: str, method: str, payload: dict | None = None) -> dict:
     return reply["result"]
 
 
-def send(text: str, loud: bool, html_mode: bool = False) -> None:
+def send(text: str, loud: bool, html_mode: bool = False, markup: dict | None = None) -> int | None:
     """html_mode: text uses Telegram's HTML formatting (only <b> here). If Telegram can't read
-    the formatting, the same message goes again as plain text rather than not at all."""
+    the formatting, the same message goes again as plain text rather than not at all.
+    markup: buttons under the message (the job to-dos' Done buttons). Returns Telegram's message id."""
     token = keyring.get_password(SERVICE, TOKEN_KEY)
     if not token or not paths.TELEGRAM_CHAT.exists():
         raise RuntimeError("Telegram not set up (run: python -m email_organiser.notify setup)")
     chat_id = int(paths.TELEGRAM_CHAT.read_text().strip())
     # disable_notification: the notification still shows, just without sound (Telegram docs).
     payload = {"chat_id": chat_id, "text": text, "disable_notification": not loud}
+    if markup:
+        payload["reply_markup"] = markup
     if not html_mode:
-        call(token, "sendMessage", payload)
-        return
+        return (call(token, "sendMessage", payload) or {}).get("message_id")
     try:
-        call(token, "sendMessage", payload | {"parse_mode": "HTML", "link_preview_options": {"is_disabled": True}})
+        result = call(token, "sendMessage", payload | {"parse_mode": "HTML", "link_preview_options": {"is_disabled": True}})
     except RuntimeError as e:
         if "parse" not in str(e).lower():   # e.g. "can't parse entities"; anything else is a real failure
             raise
         print(f"Telegram couldn't read the formatting ({e}); sending it plain")
-        call(token, "sendMessage", payload | {"text": plain(text)})
+        result = call(token, "sendMessage", payload | {"text": plain(text)})
+    return (result or {}).get("message_id")
 
 
-def ping(counts: dict, total: int, account: str, today: dict | None = None) -> bool:
-    """Send the ping; on any failure print why and carry on. Returns True if it was sent."""
+def ping(counts: dict, total: int, account: str, today: dict | None = None):
+    """Send the ping; on any failure print why and carry on. Returns Telegram's message id (or
+    True if it gave none) when sent, False when not."""
     text, loud = message(counts, total, account, today)
     try:
         if is_html(today):
-            send(text, loud, html_mode=True)
+            sent = send(text, loud, html_mode=True, markup=today.get("markup"))
         else:
-            send(text, loud)
+            sent = send(text, loud)
         print(f"Telegram ping sent{'' if loud else ' (no sound)'}: {plain(text)}")
-        return True
+        return sent or True
     except Exception as e:
         print(f"Telegram ping FAILED (summary unaffected): {e}")
         return False

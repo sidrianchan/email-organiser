@@ -15,7 +15,11 @@ Rules:
   * only mail from the last LOOKBACK_HOURS; a longer gap (the Mac asleep) is covered by the summary
   * each email is pinged at most once (`alerted` table), and never if a summary already showed it
   * 23:00-08:00 the ping is silent (still sent, no sound)
-  * the ping says how many and which account, never who or what (Telegram isn't end-to-end encrypted)
+  * the ping says how many and which account, never who or what (Telegram isn't end-to-end encrypted);
+    since 21 Nov (milestone 9) a job email that needs you to act is named, e.g. "Acme: complete
+    online assessment, due Fri 27 Nov" (Sid allowed names and dates, never email text), and a
+    job email that's only status news ("viewed", "ad closed") doesn't ping: it waits for the
+    summary. If the pipeline can't read it, it pings as before.
   * if the summary is running, this check skips its turn (runlock.py)
   * catch-up (slots.py): if the 08:00 / 18:00 summary is 10+ minutes overdue and was never
     delivered (e.g. the Mac woke briefly with no network and the run crashed), run it first.
@@ -25,7 +29,7 @@ import argparse
 import sys
 from datetime import datetime, timedelta, timezone
 
-from . import classify, digest, drafts, health, notify, slots, store, unsub_folder
+from . import classify, digest, drafts, health, notify, pipeline, slots, store, unsub_folder
 from .classify import classify_pending
 from .fetch import fetch_new
 from .runlock import run_lock
@@ -56,15 +60,40 @@ def quiet(now: datetime) -> bool:
     return now.hour >= QUIET_FROM or now.hour < QUIET_UNTIL
 
 
-def message(rows: list, now: datetime) -> tuple[str, bool]:
-    """(text, loud). Counts and account names only."""
-    jobs = sum(r["label"] == "job" for r in rows)
-    replies = sum(bool(r["needs_reply"]) and r["label"] != "job" for r in rows)
+def key(r) -> tuple:
+    return (r["account"], r["uidvalidity"], r["uid"])
+
+
+def is_update(r, reads: dict) -> bool:
+    """A job email the pipeline read as status news only: no ping (milestone 9)."""
+    rd = reads.get(key(r))
+    return r["label"] == "job" and not r["needs_reply"] and rd is not None and not rd["action_needed"]
+
+
+def action_text(r, rd: dict) -> str:
+    """'Acme: complete online assessment, due Fri 27 Nov (Yahoo)'. Names and dates only."""
+    due = f", due {datetime.fromisoformat(rd['deadline']):%a %-d %b}" if rd.get("deadline") else ""
+    return f"{rd['company']}: {rd['action'] or 'action needed'}{due} ({NAMES.get(r['account'], r['account'])})"
+
+
+def message(rows: list, now: datetime, reads: dict | None = None) -> tuple[str, bool]:
+    """(text, loud). Job emails that need action are named (company, what, by when); everything
+    else is counts and account names only."""
+    reads = reads or {}
+    named = [r for r in rows if r["label"] == "job" and (reads.get(key(r)) or {}).get("action_needed")
+             and reads[key(r)].get("company")]
+    named_keys = {key(r) for r in named}
+    rest = [r for r in rows if key(r) not in named_keys]
+    jobs = sum(r["label"] == "job" for r in rest)
+    replies = sum(bool(r["needs_reply"]) and r["label"] != "job" for r in rest)
     drafted = sum(bool(r["drafted"]) for r in rows)
+    parts = [action_text(r, reads[key(r)]) for r in named]
     bits = [f"{jobs} job email{'s' if jobs > 1 else ''}" if jobs else "",
             f"{replies} to reply" if replies else ""]
-    accounts = ", ".join(sorted({NAMES.get(r["account"], r["account"]) for r in rows}, key=str.lower))
-    text = f"{now:%H:%M} new: {', '.join(b for b in bits if b)} ({accounts})."
+    if any(bits):
+        accounts = ", ".join(sorted({NAMES.get(r["account"], r["account"]) for r in rest}, key=str.lower))
+        parts.append(f"{', '.join(b for b in bits if b)} ({accounts})")
+    text = f"{now:%H:%M} new: {'; '.join(parts)}."
     if drafted:
         text += f" {drafted} draft{'s' if drafted > 1 else ''} ready."
     return text, not quiet(now)
@@ -97,13 +126,29 @@ def check(db, live: bool, now: datetime | None = None) -> int:
     if not rows:
         print("nothing urgent")
         return 0
-    keys = {(r["account"], r["uidvalidity"], r["uid"]) for r in rows}
+    reads = {}
+    if any(r["label"] == "job" for r in rows):   # milestone 9: what each job email asks of you
+        try:
+            reads = pipeline.step(db, live=live, since_hours=LOOKBACK_HOURS)
+        except Exception as e:  # can't tell action from news: ping every job email, as before
+            print(f"Job pipeline FAILED (every job email pings, as before): {e}")
+        reads = pipeline.readings(db, [key(r) for r in rows]) | reads
+    updates = [r for r in rows if is_update(r, reads)]
+    if updates:
+        print(f"{len(updates)} application update(s), nothing to do: no ping, they're in the next summary")
+        if live:
+            db.executemany("INSERT OR IGNORE INTO alerted (account, uidvalidity, uid) VALUES (?, ?, ?)",
+                           [key(r) for r in updates])
+            db.commit()
+    keys = {key(r) for r in rows if not is_update(r, reads)}
+    if not keys:
+        return 0
     try:
         drafts.make_drafts(db, live=live, only=keys)
     except Exception as e:  # a drafting problem must never stop the ping
         print(f"Drafts FAILED (ping unaffected): {e}")
-    rows = to_alert(db)   # re-read, so the ping knows which now have a draft
-    text, loud = message(rows, now or datetime.now())
+    rows = [r for r in to_alert(db) if key(r) in keys]   # re-read, so the ping knows which now have a draft
+    text, loud = message(rows, now or datetime.now(), reads)
     if not live:
         print(f"(dry run: ping not sent; it would say: {text}{'' if loud else '  [no sound]'})")
         return 0

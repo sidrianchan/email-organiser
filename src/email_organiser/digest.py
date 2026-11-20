@@ -20,14 +20,15 @@ mailbox. It is NOT sent. There is still no sending code anywhere (design rule 2)
 """
 import argparse
 import html
+import json
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import (agenda, classify, cleanup, drafts, feedback, health, learn, notify, paths, reminders,
-               screener, slots, store, unsub_folder, weather)
+from . import (agenda, apply_queue, classify, cleanup, drafts, feedback, health, learn, notify, paths,
+               pipeline, reminders, screener, slots, store, unsub_folder, weather)
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -47,9 +48,12 @@ def pending(db) -> tuple[list, list]:
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.date, m.first_seen,
                c.label, c.needs_reply, c.reason, dr.uid IS NOT NULL AS drafted,
-               mv.uid IS NOT NULL AS moved
+               mv.uid IS NOT NULL AS moved,
+               jr.stage AS jr_stage, jr.company AS jr_company, jr.action_needed AS jr_action,
+               jr.action AS jr_what, jr.deadline AS jr_deadline, jr.posting_closed AS jr_closed
         FROM messages m
         LEFT JOIN claude_labels c USING (account, uidvalidity, uid)
+        LEFT JOIN job_reads jr USING (account, uidvalidity, uid)
         LEFT JOIN digested d USING (account, uidvalidity, uid)
         LEFT JOIN drafts dr USING (account, uidvalidity, uid)
         LEFT JOIN moved mv USING (account, uidvalidity, uid)
@@ -61,11 +65,34 @@ def pending(db) -> tuple[list, list]:
     return recent, too_old
 
 
+def jr(r, field: str):
+    """The job pipeline's reading of this email (pipeline.py), or None if it has none."""
+    return r[field] if field in r.keys() else None
+
+
+def is_update(r) -> bool:
+    """A job email the pipeline read as status news ('viewed', 'ad closed'): nothing to do, no
+    reply needed. It gets one short line under Application updates, not a full row (21 Nov)."""
+    return r["label"] == "job" and not r["needs_reply"] and jr(r, "jr_stage") is not None and not jr(r, "jr_action")
+
+
+def update_lines(rows: list) -> list[str]:
+    """One line per application: 'Acme Bank · viewed', 'Beta Ltd · ad closed' (repeats dropped)."""
+    return list(dict.fromkeys(pipeline.update_line(
+        {"company": jr(r, "jr_company"), "stage": jr(r, "jr_stage"), "posting_closed": jr(r, "jr_closed")})
+        for r in rows))
+
+
+def due_txt(iso: str) -> str:
+    return f"due {datetime.fromisoformat(iso):%a %-d %b}"
+
+
 def sections(rows: list) -> dict:
     """Split emails into the summary's groups. Each email appears in one group only."""
     return {
         "unlabelled": [r for r in rows if r["label"] is None],
-        "job": [r for r in rows if r["label"] == "job"],
+        "job": [r for r in rows if r["label"] == "job" and not is_update(r)],
+        "updates": [r for r in rows if is_update(r)],
         "reply": [r for r in rows if r["needs_reply"] and r["label"] != "job"],
         "read": [r for r in rows if r["label"] == "read" and not r["needs_reply"]],
         "counts": {name: sum(r["label"] == name for r in rows) for name in ROUTINE},
@@ -75,7 +102,7 @@ def sections(rows: list) -> dict:
 def ping_counts(rows: list, jobs: list = ()) -> dict:
     """Just the numbers for the Telegram ping: no subjects or senders leave the Mac."""
     g = sections(rows)
-    return {k: len(g[k]) for k in ("unlabelled", "job", "reply", "read")} | {"jobs": len(jobs)}
+    return {k: len(g[k]) for k in ("unlabelled", "job", "updates", "reply", "read")} | {"jobs": len(jobs)}
 
 
 def collapse(rows: list) -> tuple[list, list]:
@@ -171,20 +198,28 @@ def failed_bit(g: dict) -> str:
     return f"⚠️ {n} not labelled, Claude failed" if n else ""
 
 
-def subject_line(g: dict, total: int, jobs: list = (), cal=None) -> str:
+def todo_bit(todos) -> str:
+    n = len(todos or [])
+    return f"{n} job to-do{'s' if n > 1 else ''}" if n else ""
+
+
+def subject_line(g: dict, total: int, jobs: list = (), cal=None, todos=()) -> str:
     stamp = datetime.now().strftime("%a %H:%M")
     if failed_bit(g):   # never "nothing needs you" when Claude didn't look
-        bits = [failed_bit(g), cal_bit(cal),
+        bits = [failed_bit(g), cal_bit(cal), todo_bit(todos),
                 f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
                 f"{len(g['job'])} job" if g["job"] else "",
+                f"{len(g['updates'])} job update{'s' if len(g['updates']) > 1 else ''}" if g["updates"] else "",
                 f"{len(g['reply'])} to reply" if g["reply"] else "",
                 f"{len(g['read'])} to read" if g["read"] else ""]
         return f"Mail summary {stamp}: " + ", ".join(b for b in bits if b)
-    lead = cal_bit(cal) + (", " if cal_bit(cal) else "")
-    if jobs or g["job"] or g["reply"] or g["read"]:
-        bits = [cal_bit(cal),
+    lead = ", ".join(b for b in (cal_bit(cal), todo_bit(todos)) if b)
+    lead += ", " if lead else ""
+    if jobs or g["job"] or g["updates"] or g["reply"] or g["read"]:
+        bits = [cal_bit(cal), todo_bit(todos),
                 f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
                 f"{len(g['job'])} job" if g["job"] else "",
+                f"{len(g['updates'])} job update{'s' if len(g['updates']) > 1 else ''}" if g["updates"] else "",
                 f"{len(g['reply'])} to reply" if g["reply"] else "",
                 f"{len(g['read'])} to read" if g["read"] else ""]
         return f"Mail summary {stamp}: " + ", ".join(b for b in bits if b)
@@ -223,7 +258,7 @@ def footer_line(rows: list) -> str:
     return "Labelled by Claude. Nothing was deleted or sent."
 
 
-def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
+def build_text(rows: list, jobs: list = (), notes: list = (), cal=None, todos=()) -> str:
     """Plain-text version, for mail apps that don't show HTML."""
     g = sections(rows)
     out = [f"{len(rows)} new emails since the last summary", ""]
@@ -253,6 +288,10 @@ def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
                 out += [f"* {ev['start']:%a %-d %b} ({agenda.days_away(ev, cal['day'])}), "
                         f"{agenda.when(ev, ev['start'].date())}  {title_of(ev)}"] + \
                        ([f"  Prepare: {ev['prep']}"] if ev["prep"] else []) + [""]
+    if todos:   # what your applications are waiting for you to do (21 Nov)
+        today = (cal or {}).get("day") or datetime.now().date()
+        out += [f"JOB TO-DOS ({len(todos)})", "-" * 30]
+        out += [f"* {t['company']}: {t['action']} ({pipeline.due_words(t['due'], today)})" for t in todos] + [""]
     if jobs:
         out += [f"JOBS WORTH APPLYING TO ({len(jobs)})", "-" * 30]
         for j in jobs:
@@ -265,14 +304,19 @@ def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
             for r in singles:
                 tag = "  [needs reply]" if r["needs_reply"] and key == "job" else ""
                 tag += "  [draft in Drafts]" if has_draft(r) else ""
+                todo = (f"  To do: {jr(r, 'jr_what')}" + (f" ({due_txt(jr(r, 'jr_deadline'))})" if jr(r, "jr_deadline") else "")
+                        if jr(r, "jr_action") and jr(r, "jr_what") else "")
                 out += [f"* {r['subject']}{tag}",
-                        f"  {sender_name(r)} | {r['account']} | {when(r)}",
-                        f"  {r['reason']}", ""]
+                        f"  {sender_name(r)} | {r['account']} | {when(r)}"] + ([todo] if todo else []) + \
+                       [f"  {r['reason']}", ""]
             for name, rs in groups:
                 accounts = ", ".join(sorted({r["account"] for r in rs}))
                 out += [f"* {name}: {len(rs)} emails",
                         f"  {accounts} | latest {when(rs[0])}",
                         f"  {group_subjects(rs)}", ""]
+        if key == "job" and g["updates"]:   # status news: one short line per application
+            lines = update_lines(g["updates"])
+            out += [f"APPLICATION UPDATES ({len(lines)})", "-" * 30] + [f"* {l}" for l in lines] + [""]
     routine = ", ".join(f"{n} {name}" for name, n in g["counts"].items() if n)
     if routine:
         out.append(f"Everything else: {routine}.")
@@ -317,7 +361,7 @@ def dark_css() -> str:
     return "@media (prefers-color-scheme: dark){" + "".join(rules) + "}"
 
 
-def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
+def build_html(rows: list, jobs: list = (), notes: list = (), cal=None, todos=()) -> str:
     """The nicer version: a whole HTML document. Styles are inline because many mail apps
     strip <style> blocks; the <style> block only adds dark mode on top.
 
@@ -394,6 +438,7 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
             due = reminders.when(t, cal["day"])
             body.append(day_row("To do", title_of(t), due[:1].upper() + due[1:],   # not .capitalize(): keeps 'Wed'
                                 "#b91c1c" if t["overdue"] else "#b45309"))
+
         if weather.line(cal.get("weather")):
             body.append(day_row("Weather", weather.line(cal.get("weather"))))
         for w in warnings_of(cal):
@@ -405,6 +450,14 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
                 body.append(day_row(f"{ev['start']:%a %-d %b}", f"{time_txt} · {title_of(ev)}",
                                     f"Prepare: {ev['prep']}" if ev["prep"] else "",
                                     left_note=agenda.days_away(ev, cal["day"])))
+    if todos:   # what your applications are waiting for you to do (21 Nov)
+        today = (cal or {}).get("day") or datetime.now().date()
+        body.append(heading("Job to-dos", "#dc2626", len(todos)))
+        for t in todos:
+            soon = t["due"] is not None and (t["due"] - today).days <= 2
+            when_txt = pipeline.due_words(t["due"], today)
+            body.append(day_row(pipeline.short_company(t["company"]), t["action"] or "action needed",
+                                when_txt[:1].upper() + when_txt[1:], "#b91c1c" if soon or t["due"] is None else "#b45309"))
     if jobs:  # then: the point of the whole job hunt
         body.append(heading("Jobs worth applying to", "#0d9488", len(jobs)))
         for j in jobs:
@@ -418,20 +471,28 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
                                                     f"closes {j['closing']}" if j["closing"] else "") if x)
             body.append(item(title, where, e(j["reason"] or "")))
     for key, heading_text, colour in GROUPS:
-        if not g[key]:
+        if not g[key] and not (key == "job" and g["updates"]):
             continue
-        body.append(heading(heading_text, colour, len(g[key])))
+        if g[key]:
+            body.append(heading(heading_text, colour, len(g[key])))
         singles, groups = collapse(g[key]) if key == "read" else (g[key], [])
         for r in singles:
             badges = badge("needs reply", "#d97706") if r["needs_reply"] and key == "job" else ""
             badges += badge("draft ready", "#7c3aed") if has_draft(r) else ""
+            badges += badge(due_txt(jr(r, "jr_deadline")), "#dc2626") if key == "job" and jr(r, "jr_deadline") else ""
+            todo = e(f"To do: {jr(r, 'jr_what')}") + " &middot; " if jr(r, "jr_action") and jr(r, "jr_what") else ""
             body.append(item(e(r["subject"] or "(no subject)") + badges,
                              f'{e(sender_name(r))} &middot; {e(r["account"])} &middot; {e(when(r))}',
-                             e(r["reason"] or "")))
+                             todo + e(r["reason"] or "")))
         for name, rs in groups:
             accounts = ", ".join(sorted({r["account"] for r in rs}))
             body.append(item(e(name) + badge(f"{len(rs)} emails", "#6b7280"),
                              f'{e(accounts)} &middot; latest {e(when(rs[0]))}', e(group_subjects(rs))))
+        if key == "job" and g["updates"]:   # status news: one short line per application
+            lines = update_lines(g["updates"])
+            body.append(heading("Application updates", "#475569", len(lines)))
+            body += [f'<div class="eo-row eo-meta" style="padding:6px 0 6px 14px;border-bottom:1px solid #eef0f2;'
+                     f'font-size:14px;color:#4b5563">{e(l)}</div>' for l in lines]
 
     routine = " &middot; ".join(f"{n} {e(name)}" for name, n in g["counts"].items() if n)
     extra = ([moved_line(rows)] if moved_line(rows) else []) + \
@@ -500,11 +561,12 @@ def today_brief(cal) -> dict | None:
         cal_lines = [f"{e(agenda.when(ev, day).replace(' – ', '–'))} · {label(ev)}" for ev in events[:8]]
         cal_lines += [f"+{len(events) - 8} more"] if len(events) > 8 else []
     sections.append("<b>📅 Calendar</b>\n" + "\n".join(cal_lines))
-    if cal.get("todo"):
-        sections.append("<b>✅ To do</b>\n" + "\n".join(
-            f"{label(t)} · {e(reminders.when(t, day, compact=True))}" for t in cal["todo"]))
-    elif "todo" in cal and cal["todo"] is None:
-        sections.append("<b>✅ To do</b>\nCouldn't read Reminders")
+    todo = [f"{label(t)} · {e(reminders.when(t, day, compact=True))}" for t in cal.get("todo") or []]
+    todo += [todo_line(t, day) for t in cal.get("job_todos") or []]
+    if "todo" in cal and cal["todo"] is None:
+        todo.append("Couldn't read Reminders")
+    if todo:
+        sections.append("<b>✅ To do</b>\n" + "\n".join(todo))
     if cal["upcoming"]:
         rows = []
         for ev in cal["upcoming"][:3]:
@@ -514,12 +576,30 @@ def today_brief(cal) -> dict | None:
             if prep:
                 rows.append(f"↳ {e(short(prep, 60))}")
         sections.append("<b>⏳ Coming up</b>\n" + "\n".join(rows))
+    if cal.get("pipeline"):
+        sections.append(f"<b>💼 Jobs</b>\n{e(cal['pipeline'])}")
     sky = weather.line(cal.get("weather"), brief=True)
     if sky or warnings_of(cal):
         sections.append("<b>🌤 Weather</b>\n" + "\n".join(
             ([e(sky)] if sky else []) + [f"⚠️ {e(w)}" for w in warnings_of(cal)]))
-    busy = bool(events or cal.get("todo") or cal["upcoming"] or warnings_of(cal))
-    return dict(sections=sections, loud=busy)
+    busy = bool(events or cal.get("todo") or cal.get("job_todos") or cal["upcoming"] or warnings_of(cal))
+    return dict(sections=sections, loud=busy, todo_ids=[t["id"] for t in cal.get("job_todos") or []])
+
+
+def todo_line(t: dict, today) -> str:
+    """'Shell · Complete Virtual Job Tryout and video interview · due Thu 26 Nov' (escaped)."""
+    e = html.escape
+    return (f"{e(pipeline.short_company(t['company']))} · {e(short(t['action'] or 'action needed', 50))} · "
+            f"{e(pipeline.due_words(t['due'], today))}")
+
+
+def todo_brief(todos, today) -> dict | None:
+    """The evening ping's reminder (21 Nov): your job to-dos above the mail line, with Done buttons.
+    None when there's nothing to do."""
+    if not todos:
+        return None
+    return dict(sections=["<b>📝 Job to-dos</b>\n" + "\n".join(todo_line(t, today) for t in todos)],
+                loud=False, todo_ids=[t["id"] for t in todos])
 
 
 def deliver(subject: str, text: str, html_body: str) -> None:
@@ -570,6 +650,37 @@ def main() -> None:
             summarise(args.live, args.sample, slot=morning if args.morning else None)
 
 
+def with_buttons(db, brief):
+    """The brief plus its Done buttons (pipeline.todo_keyboard), if it has job to-dos."""
+    if not brief or not brief.get("todo_ids"):
+        return brief
+    return brief | {"markup": pipeline.todo_keyboard(db, brief["todo_ids"])}
+
+
+def remember_buttons(db, message_id, brief) -> None:
+    """Which to-dos a sent ping carries, so a Done tap can redraw its buttons. Never raises."""
+    if not message_id or not brief or not brief.get("todo_ids"):
+        return
+    try:
+        db.execute("INSERT OR REPLACE INTO todo_messages (message_id, app_ids) VALUES (?, ?)",
+                   (int(message_id), json.dumps(brief["todo_ids"])))
+        db.commit()
+    except Exception as e:
+        print(f"Couldn't record the Done buttons (taps on them won't redraw): {e}")
+
+
+def send_queue(db, cal) -> None:
+    """Mornings only (cal exists): the apply queue message (apply_queue.py). Never raises."""
+    if not cal:
+        return
+    try:
+        n = apply_queue.send(db, cal["day"])
+        if n:
+            print(f"Telegram: apply queue sent ({n} jobs)")
+    except Exception as e:
+        print(f"Apply queue FAILED (summary unaffected): {e}")
+
+
 def summarise_recorded(via: str, now: datetime | None = None, force: bool = False) -> bool:
     """A real summary, recorded in summary_runs (slots.py) so a missing one can be caught up.
     Skips if this slot's summary was already delivered (e.g. the 15-minute check caught it up
@@ -612,6 +723,10 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
         fetch_new(db, LOOKBACK_HOURS, show=False)
         learn.step(db, live=live)   # corrections -> rules BEFORE labelling and moving; never raises
         classify_pending(db)
+        try:   # milestone 9: what each new job email asks of you; never stops the summary
+            pipeline.step(db, live=live, since_hours=LOOKBACK_HOURS)
+        except Exception as e:
+            print(f"Job pipeline FAILED (summary unaffected; job emails shown in full): {e}")
         try:
             screener.run(db, live=live)
         except Exception as e:  # a screening problem must never stop the summary
@@ -628,20 +743,31 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
             print(f"Clean-up FAILED (summary unaffected): {e}")
 
     cal = agenda.get(db, now=slot)   # Calendar.app, read-only; mornings only (by slot, so a late 08:00 still has it); never raises
+    today = cal["day"] if cal else (slot or datetime.now()).date()
+    todos = []
+    try:   # what your applications are waiting for you to do, in both summaries (21 Nov)
+        todos = pipeline.todos(db, today)
+        if cal:
+            cal["job_todos"] = todos
+            cal["pipeline"] = pipeline.pipeline_line(db, today)
+    except Exception as e:
+        print(f"Job pipeline view FAILED (summary unaffected): {e}")
+    brief = today_brief(cal) if cal else todo_brief(todos, today)
     recent, too_old = pending(db)
     jobs = screener.unshown_high(db)
     if too_old and not sample:
         print(f"{len(too_old)} older emails skipped (over {MAX_AGE_HOURS}h old)")
-    if not recent and not jobs and not has_cal(cal) and not step_notes:
+    if not recent and not jobs and not has_cal(cal) and not step_notes:   # (to-dos alone ride on the ping)
         print("No new emails: no summary this time.")
         if live and not sample:
             mark_done(db, too_old)
-            notify.ping(ping_counts(recent), 0, DELIVER_TO, today_brief(cal))  # still ping: silence would mean "broken"
+            remember_buttons(db, notify.ping(ping_counts(recent), 0, DELIVER_TO, with_buttons(db, brief)), brief)
+            send_queue(db, cal)
         return (None if sample else db), live
 
-    subject = subject_line(sections(recent), len(recent), jobs, cal)
+    subject = subject_line(sections(recent), len(recent), jobs, cal, todos)
     notes = step_notes + learn.unshown_lines(db) + unsub_folder.unshown_lines(db)
-    text, html_body = build_text(recent, jobs, notes, cal), build_html(recent, jobs, notes, cal)
+    text, html_body = build_text(recent, jobs, notes, cal, todos), build_html(recent, jobs, notes, cal, todos)
     print(f"\nSubject: {subject}\n\n{text}\n")
 
     preview = paths.PREVIEW
@@ -654,15 +780,18 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
             learn.mark_shown(db)
             unsub_folder.mark_shown(db)
         print(f"Delivered to your {DELIVER_TO} inbox.")
-        notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO, today_brief(cal))  # after delivery
+        remember_buttons(db, notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO,
+                                         with_buttons(db, brief)), brief)   # after delivery
         if jobs and not sample:
             try:   # each good job with feedback buttons (feedback.py); never stops the summary
                 print(f"Telegram: {feedback.send_jobs(db, jobs)} job(s) sent with buttons")
             except Exception as e:
                 print(f"Job buttons FAILED (summary unaffected; retried with the next summary's jobs only): {e}")
+        if not sample:
+            send_queue(db, cal)
     else:
         print(f"(dry run: nothing delivered. HTML preview: {preview})")
-        text, loud = notify.message(ping_counts(recent, jobs), len(recent), DELIVER_TO, today_brief(cal))
+        text, loud = notify.message(ping_counts(recent, jobs), len(recent), DELIVER_TO, brief)
         print(f"(dry run: Telegram ping not sent; it would say: {notify.plain(text)}{'' if loud else '  [no sound]'})")
         if sample:
             subprocess.run(["open", str(preview)])  # show it in your browser
