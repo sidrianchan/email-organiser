@@ -4,8 +4,9 @@ SQLite = a whole database in one file (~/.email-organiser/mail.db, see paths.py)
 No server to install, and it lives outside the code folder, so it never reaches GitHub.
 """
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 from . import paths
 
@@ -141,6 +142,13 @@ CREATE TABLE IF NOT EXISTS event_flags (
     important INTEGER, prep TEXT, model TEXT,
     judged_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS short_titles (   -- shorten.py: a long event/reminder title, said briefly
+    kind TEXT NOT NULL,                      -- event / reminder / prep
+    original TEXT NOT NULL,
+    short TEXT NOT NULL, model TEXT,
+    made_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (kind, original)
+);
 CREATE TABLE IF NOT EXISTS unsub_requests (
     id INTEGER PRIMARY KEY,
     account TEXT, sender TEXT, subject TEXT,
@@ -194,6 +202,37 @@ def open_db() -> sqlite3.Connection:
     _add_column_if_missing(db, "jobs", "employer_size", "TEXT")   # large/small/unknown: orders the high list
     _add_column_if_missing(db, "drafts", "body", "TEXT")   # milestone 7: compare with what you sent
     return db
+
+
+KEEP_BACKUPS = 7   # days
+
+
+def backup(db: sqlite3.Connection, folder: Path | None = None, today: date | None = None,
+           keep: int = KEEP_BACKUPS) -> Path | None:
+    """A daily copy of the database (21 Nov), so a corrupted file or a bad change can be undone.
+    The database holds things that can't be rebuilt: your hand labels, corrections and job taps.
+
+    One file per day (mail-YYYY-MM-DD.db); the first real summary of the day makes it, later
+    runs that day find it there and skip. The newest `keep` are kept. SQLite's own backup copies
+    a consistent snapshot even while another run is writing. Same disk, so it doesn't protect
+    against losing the Mac (that needs Time Machine or similar). Never raises."""
+    try:
+        folder = folder or paths.BACKUPS
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"mail-{today or date.today():%Y-%m-%d}.db"
+        if not target.exists():
+            copy = sqlite3.connect(target)
+            try:
+                db.backup(copy)
+            finally:
+                copy.close()
+            print(f"Database backed up to {target}")
+        for old in sorted(folder.glob("mail-*.db"))[:-keep]:   # names sort by date
+            old.unlink()
+        return target
+    except Exception as e:
+        print(f"Database backup FAILED (nothing else affected): {e}")
+        return None
 
 
 def _add_column_if_missing(db: sqlite3.Connection, table: str, column: str, kind: str) -> None:

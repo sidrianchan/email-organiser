@@ -1,5 +1,7 @@
 """Your calendar in the 08:00 summary: today's events, plus anything in the next 7 days
 that needs preparing (Claude decides which; each event is judged once and remembered).
+Since 21 Nov the same morning read also brings in Apple Reminders due today or overdue
+(reminders.py) and Hong Kong weather warnings (weather.py): the "Today" brief.
 
 Reads macOS Calendar.app with AppleScript (osascript). Read-only: nothing here creates,
 changes or deletes an event.
@@ -27,6 +29,7 @@ from datetime import date, datetime, time, timedelta
 
 from dateutil.rrule import rrulestr
 
+from . import reminders, shorten, weather
 from .classify import LABEL_MODEL, run_claude
 
 LOOKAHEAD_DAYS = 7     # important events show every morning from this many days before
@@ -242,26 +245,30 @@ def when(ev: dict, day: date) -> str:
 
 
 def get(db, now: datetime | None = None) -> dict | None:
-    """For the morning summary: {'label', 'day', 'events', 'upcoming', 'judged'}.
+    """For the morning summary: {'label', 'day', 'events', 'upcoming', 'judged', 'todo', 'weather'}.
     events is None if the calendar couldn't be read; upcoming = important events in the next
-    LOOKAHEAD_DAYS days. Returns None for the evening run (calendar is a morning thing).
-    Never raises: a calendar problem must never stop the summary."""
+    LOOKAHEAD_DAYS days; todo = Apple Reminders due today or overdue (None if they couldn't be
+    read; reminders.py); weather = Hong Kong forecast and warnings (None abroad or if the
+    Observatory couldn't be reached; weather.py). Returns None for the evening run (the day's
+    plan is a morning thing). Never raises: a calendar problem must never stop the summary."""
     now = now or datetime.now()
     if now.hour >= 12:
         return None
     day = now.date()
+    extras = dict(todo=reminders.get(day), weather=weather.get(day))   # each never raises
     try:
         everything = parse(read_raw())
     except Exception as e:
         print(f"Calendar FAILED (summary unaffected): {e}")
-        return dict(label="Today", day=day, events=None, upcoming=[], judged=True)
+        return shorten.apply(db, dict(label="Today", day=day, events=None, upcoming=[], judged=True) | extras)
     today = for_day(everything, day)
     ahead = for_range(everything, day + timedelta(days=1), LOOKAHEAD_DAYS)
     judged = judge(db, today + ahead)
     today, ahead = with_flags(db, today), with_flags(db, ahead)
     upcoming = [ev for ev in ahead if ev["important"]]
     print(f"Calendar: {len(today)} event(s) today, {len(upcoming)} important in the next {LOOKAHEAD_DAYS} days")
-    return dict(label="Today", day=day, events=today, upcoming=upcoming, judged=judged)
+    # short labels for long titles (shorten.py): one remembered Claude call, never raises
+    return shorten.apply(db, dict(label="Today", day=day, events=today, upcoming=upcoming, judged=judged) | extras)
 
 
 def days_away(ev: dict, day: date) -> str:

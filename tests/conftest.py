@@ -38,3 +38,24 @@ def no_real_telegram_job_buttons(monkeypatch, tmp_path):
     monkeypatch.setattr(feedback, "OFFSET", tmp_path / "telegram_offset")
     monkeypatch.setattr(feedback, "SEND_GAP", 0)
     monkeypatch.setattr(paths, "APPLIED", tmp_path / "applied.tsv")
+
+
+@pytest.fixture(autouse=True)
+def no_real_reminders_or_weather(monkeypatch):
+    """Tests never read Reminders.app or call the Hong Kong Observatory. Default: no reminders,
+    and "not in Hong Kong" so no weather is fetched. A test that wants either patches it itself."""
+    from email_organiser import reminders, weather
+    monkeypatch.setattr(reminders, "read_raw", lambda: "")
+    monkeypatch.setattr(weather, "in_hong_kong", lambda: False)
+    def no_network(kind):
+        raise AssertionError("tests must not call the Hong Kong Observatory")
+    monkeypatch.setattr(weather, "fetch", no_network)
+
+
+@pytest.fixture(autouse=True)
+def no_real_title_shortening(monkeypatch):
+    """Long calendar/reminder titles would be shortened by a real Claude call (shorten.py).
+    Tests never make it; a test that wants shortening patches shorten.run_claude itself."""
+    from email_organiser import shorten
+    monkeypatch.setattr(shorten, "run_claude",
+                        lambda *a, **k: pytest.fail("tests must not call Claude to shorten titles"))

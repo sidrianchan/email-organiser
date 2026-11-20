@@ -1,8 +1,9 @@
 """Milestone 3: the twice-daily summary.
 
 One run = fetch new mail -> Claude labels it -> job alerts screened -> reply drafts (milestone 4)
-          -> junk to Assistant-Review (milestone 5) -> your calendar (08:00 only: today + what needs preparing this week)
-          -> build a summary -> put it in your inbox -> Telegram ping.
+          -> junk to Assistant-Review (milestone 5) -> your day (08:00 only: calendar, Apple Reminders due,
+          what needs preparing this week, Hong Kong weather warnings) -> build a summary -> put it in
+          your inbox -> Telegram ping (in the morning it carries the day's brief too).
 The summary also lists what happened to emails you dragged into an Unsubscribe folder (unsub_folder.py).
 
 Dry run by default (design rule 0): prints the summary and changes nothing.
@@ -12,6 +13,7 @@ For real:
 Preview the design with recent mail, without marking anything as summarised:
     python3 -m uv run python -m email_organiser.digest --sample            (opens in browser)
     python3 -m uv run python -m email_organiser.digest --sample --live     (puts it in your inbox)
+    python3 -m uv run python -m email_organiser.digest --sample --morning  (the 08:00 view, at any hour)
 
 "Put it in your inbox" is IMAP APPEND: the summary is placed straight into your own
 mailbox. It is NOT sent. There is still no sending code anywhere (design rule 2).
@@ -24,7 +26,8 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import agenda, classify, cleanup, drafts, feedback, health, learn, notify, paths, screener, slots, store, unsub_folder
+from . import (agenda, classify, cleanup, drafts, feedback, health, learn, notify, paths, reminders,
+               screener, slots, store, unsub_folder, weather)
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -120,16 +123,29 @@ def when(r) -> str:
 
 
 def cal_bit(cal) -> str:
-    """'1 event today, 1 coming up', or '' when there's nothing (or it couldn't be read)."""
-    if not cal or cal["events"] is None:
+    """'1 event today, 1 to do, 1 coming up', or '' when there's nothing (or it couldn't be read)."""
+    if not cal:
         return ""
-    n, u = len(cal["events"]), len(cal["upcoming"])
+    n, t, u = len(cal["events"] or []), len(cal.get("todo") or []), len(cal["upcoming"])
     return ", ".join(b for b in (f"{n} event{'s' if n > 1 else ''} today" if n else "",
+                                 f"{t} to do" if t else "",
                                  f"{u} coming up" if u else "") if b)
 
 
+def warnings_of(cal) -> list:
+    """Hong Kong weather warnings in force this morning (weather.py), e.g. a No. 8 signal."""
+    return ((cal or {}).get("weather") or {}).get("warnings") or []
+
+
 def has_cal(cal) -> bool:
-    return bool(cal and (cal["events"] or cal["upcoming"]))
+    """Worth a morning summary even with no new mail: events, to-dos or a warning signal."""
+    return bool(cal and (cal["events"] or cal["upcoming"] or cal.get("todo") or warnings_of(cal)))
+
+
+def show_today(cal) -> bool:
+    """Whether the summary gets a Today section at all."""
+    return bool(cal and (cal["events"] is not None or cal.get("todo") or warnings_of(cal)
+                         or weather.line(cal.get("weather"))))
 
 
 def cal_heading(cal) -> str:
@@ -140,11 +156,14 @@ def cal_note(cal) -> list:
     """A failed calendar read is said out loud, so an empty section is never mistaken for a free day."""
     if not cal:
         return []
+    notes = []
     if cal["events"] is None:
-        return ["Calendar couldn't be read this time, so events are missing from this summary."]
-    if not cal["judged"]:
-        return ["Couldn't check which upcoming events need preparing this time; retrying tomorrow."]
-    return []
+        notes.append("Calendar couldn't be read this time, so events are missing from this summary.")
+    elif not cal["judged"]:
+        notes.append("Couldn't check which upcoming events need preparing this time; retrying tomorrow.")
+    if "todo" in cal and cal["todo"] is None:
+        notes.append("Reminders couldn't be read this time, so to-dos are missing from this summary.")
+    return notes
 
 
 def failed_bit(g: dict) -> str:
@@ -212,20 +231,27 @@ def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
         out += [f"⚠️ {FAILED_HEADING.upper()} ({len(g['unlabelled'])})", "-" * 30]
         for r in g["unlabelled"]:
             out += [f"* {r['subject'] or '(no subject)'}", f"  {sender_name(r)} | {r['account']} | {when(r)}", ""]
-    if cal and cal["events"] is not None:  # first: the shape of the day
-        if cal["events"]:
-            out += [f"{cal_heading(cal).upper()} ({len(cal['events'])})", "-" * 30]
-            for ev in cal["events"]:
-                out += [f"* {agenda.when(ev, cal['day'])}  {ev['title']}"] + \
+    if show_today(cal):  # first: the shape of the day
+        events = cal["events"] or []
+        if events:
+            out += [f"{cal_heading(cal).upper()} ({len(events)})", "-" * 30]
+            for ev in events:
+                out += [f"* {agenda.when(ev, cal['day'])}  {title_of(ev)}"] + \
                        ([f"  Prepare: {ev['prep']}"] if ev["important"] and ev["prep"] else [])
-            out += [""]
-        else:
-            out += [f"{cal_heading(cal).upper()}: nothing on the calendar", ""]
+        elif cal["events"] is not None:
+            out += [f"{cal_heading(cal).upper()}: nothing on the calendar"]
+        else:   # calendar unreadable (said in the footer), but there are to-dos or weather
+            out += [cal_heading(cal).upper(), "-" * 30]
+        for t in cal.get("todo") or []:
+            out += [f"* To do: {title_of(t)} ({reminders.when(t, cal['day'])})"]
+        if weather.line(cal.get("weather")):
+            out += [f"* Weather: {weather.line(cal.get('weather'))}"]
+        out += [f"* ⚠️ {w}" for w in warnings_of(cal)] + [""]
         if cal["upcoming"]:
             out += [f"COMING UP, NEEDS PREPARING ({len(cal['upcoming'])})", "-" * 30]
             for ev in cal["upcoming"]:
                 out += [f"* {ev['start']:%a %-d %b} ({agenda.days_away(ev, cal['day'])}), "
-                        f"{agenda.when(ev, ev['start'].date())}  {ev['title']}"] + \
+                        f"{agenda.when(ev, ev['start'].date())}  {title_of(ev)}"] + \
                        ([f"  Prepare: {ev['prep']}"] if ev["prep"] else []) + [""]
     if jobs:
         out += [f"JOBS WORTH APPLYING TO ({len(jobs)})", "-" * 30]
@@ -259,8 +285,41 @@ def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
     return "\n".join(out)
 
 
+# Dark mode (21 Nov). Mail.app follows the Mac's dark appearance, and without these rules the
+# summary was a bright white card in a dark inbox. The inline styles stay as the light version, so
+# a mail app that drops <style> still shows a readable summary; the rules below override them only
+# when the reader is in dark mode (Apple Mail on Mac and iPhone supports this).
+DARK = {  # class -> dark-mode CSS
+    "eo-body": "background:#16181d!important;color:#e5e7eb!important",
+    "eo-text": "color:#f3f4f6!important",
+    "eo-meta": "color:#b4bac3!important",
+    "eo-sub": "color:#9aa1ab!important",
+    "eo-faint": "color:#7d848e!important",
+    "eo-row": "border-bottom-color:#2b3038!important",
+    "eo-box": "background:#1f232a!important;color:#c3c8cf!important",
+}
+ACCENT_DARK = {  # section and badge colours -> brighter versions that read on a dark background
+    "#2563eb": "#7aa7ff", "#d97706": "#f2a33a", "#059669": "#34d399", "#0d9488": "#2dd4bf",
+    "#475569": "#a3b1c6", "#b45309": "#f0a95b", "#dc2626": "#f87171", "#b91c1c": "#f87171",
+    "#7c3aed": "#b197fc", "#6b7280": "#a1a7b0",
+}
+
+
+def accent(colour: str) -> str:
+    """The class that lets dark mode brighten one accent colour."""
+    return f"eo-c{colour.lstrip('#')}"
+
+
+def dark_css() -> str:
+    rules = [f".{cls}{{{css}}}" for cls, css in DARK.items()]
+    rules += [f".{accent(c)}{{color:{d}!important;border-left-color:{d}!important}}"
+              for c, d in ACCENT_DARK.items()]
+    return "@media (prefers-color-scheme: dark){" + "".join(rules) + "}"
+
+
 def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
-    """The nicer version. Styles are inline because many mail apps strip <style> blocks.
+    """The nicer version: a whole HTML document. Styles are inline because many mail apps
+    strip <style> blocks; the <style> block only adds dark mode on top.
 
     Every piece of email text goes through html.escape(): a sender could put HTML
     or script in a subject line, and escaping shows it as plain text instead of running it.
@@ -270,9 +329,46 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
     font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"
 
     def chip(text, colour):
-        return (f'<span style="display:inline-block;padding:3px 10px;margin:0 6px 6px 0;'
-                f'border-radius:12px;background:{colour}1a;color:{colour};font-size:13px;'
-                f'font-weight:600">{e(text)}</span>')
+        return (f'<span class="{accent(colour)}" style="display:inline-block;padding:3px 10px;'
+                f'margin:0 6px 6px 0;border-radius:12px;background:{colour}1a;color:{colour};'
+                f'font-size:13px;font-weight:600">{e(text)}</span>')
+
+    def badge(text, colour):
+        return (f' <span class="{accent(colour)}" style="padding:1px 7px;border-radius:9px;'
+                f'background:{colour}1a;color:{colour};font-size:11px;font-weight:600">{e(text)}</span>')
+
+    def heading(text, colour, count=None):
+        n = f" &middot; {count}" if count is not None else ""
+        return (f'<div class="{accent(colour)}" style="margin:22px 0 4px;padding-left:10px;'
+                f'border-left:4px solid {colour};font-size:13px;font-weight:700;letter-spacing:.06em;'
+                f'text-transform:uppercase;color:{colour}">{e(text)}{n}</div>')
+
+    def item(title_html, meta_html="", sub_html=""):
+        """One email or job: bold title, a meta line, a muted reason. Pieces arrive escaped."""
+        return ('<div class="eo-row" style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
+                f'<div class="eo-text" style="font-size:15px;font-weight:600;color:#111827;line-height:1.35">'
+                f'{title_html}</div>'
+                + (f'<div class="eo-meta" style="font-size:13px;color:#4b5563;margin-top:2px">{meta_html}</div>'
+                   if meta_html else "")
+                + (f'<div class="eo-sub" style="font-size:13px;color:#6b7280;margin-top:3px">{sub_html}</div>'
+                   if sub_html else "")
+                + '</div>')
+
+    def day_row(left, right, below="", below_colour="#b45309", left_note=""):
+        """A Today line: time (or 'To do') in a left column, what in a right column, a note under
+        it. A two-cell table (21 Nov): long titles wrap inside their own column instead of under
+        the time, and a long date can't run into the text beside it. Tables are the layout that
+        every mail app renders the same way."""
+        note = (f'<div class="{accent(below_colour)}" style="font-size:13px;color:{below_colour};'
+                f'margin-top:3px">{e(below)}</div>' if below else "")
+        small = (f'<div class="eo-sub" style="font-size:12px;font-weight:400;color:#6b7280;margin-top:1px">'
+                 f'{e(left_note)}</div>' if left_note else "")
+        return ('<table role="presentation" class="eo-row" width="100%" cellpadding="0" cellspacing="0" '
+                'style="border-collapse:collapse;border-bottom:1px solid #eef0f2"><tr>'
+                '<td class="eo-text" style="width:118px;padding:8px 10px 8px 14px;vertical-align:top;'
+                f'font-size:15px;font-weight:600;color:#111827">{e(left)}{small}</td>'
+                '<td class="eo-text" style="padding:8px 0;vertical-align:top;font-size:15px;color:#111827">'
+                f'{e(right)}{note}</td></tr></table>')
 
     chips = (chip(f"⚠️ {len(g['unlabelled'])} not labelled", "#dc2626") if g["unlabelled"] else "") + \
         (chip(f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}", "#0d9488") if jobs else "") + \
@@ -281,117 +377,149 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
 
     body = []
     if g["unlabelled"]:   # first: the summary can't vouch for these
-        red = "#dc2626"
-        body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {red};'
-                    f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
-                    f'color:{red}">{e(FAILED_HEADING)} &middot; {len(g["unlabelled"])}</div>')
+        body.append(heading(FAILED_HEADING, "#dc2626", len(g["unlabelled"])))
         for r in g["unlabelled"]:
-            body.append(
-                '<div style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
-                f'<div style="font-size:15px;font-weight:600;color:#111827;line-height:1.35">'
-                f'{e(r["subject"] or "(no subject)")}</div>'
-                f'<div style="font-size:13px;color:#4b5563;margin-top:2px">{e(sender_name(r))}'
-                f' &middot; {e(r["account"])} &middot; {e(when(r))}</div></div>')
-    if cal and cal["events"] is not None:  # first: the shape of the day
-        slate = "#475569"
-        n = f" &middot; {len(cal['events'])}" if cal["events"] else ""
-        body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {slate};'
-                    f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
-                    f'color:{slate}">{e(cal_heading(cal))}{n}</div>')
-        def event_row(when_txt, ev, time_txt=""):
-            prep = (f'<div style="font-size:13px;color:#b45309;margin-top:3px">Prepare: {e(ev["prep"])}</div>'
-                    if ev["important"] and ev["prep"] else "")
-            return ('<div style="padding:8px 0 8px 14px;border-bottom:1px solid #eef0f2;font-size:15px">'
-                    f'<span style="display:inline-block;min-width:120px;font-weight:600;color:#111827">'
-                    f'{e(when_txt)}</span>'
-                    f'<span style="color:#111827">{e(time_txt + " " if time_txt else "")}'
-                    f'{e(ev["title"] or "(no title)")}</span>{prep}</div>')
-        for ev in cal["events"]:
-            body.append(event_row(agenda.when(ev, cal["day"]), ev))
-        if not cal["events"]:
-            body.append('<div style="padding:8px 0 8px 14px;font-size:14px;color:#6b7280">'
+            body.append(item(e(r["subject"] or "(no subject)"),
+                             f'{e(sender_name(r))} &middot; {e(r["account"])} &middot; {e(when(r))}'))
+    if show_today(cal):  # first: the shape of the day
+        events = cal["events"] or []
+        body.append(heading(cal_heading(cal), "#475569", len(events) if events else None))
+        for ev in events:
+            body.append(day_row(agenda.when(ev, cal["day"]), title_of(ev),
+                                f"Prepare: {ev['prep']}" if ev["important"] and ev["prep"] else ""))
+        if cal["events"] == []:
+            body.append('<div class="eo-sub" style="padding:8px 0 8px 14px;font-size:14px;color:#6b7280">'
                         'Nothing on the calendar.</div>')
+        for t in cal.get("todo") or []:
+            due = reminders.when(t, cal["day"])
+            body.append(day_row("To do", title_of(t), due[:1].upper() + due[1:],   # not .capitalize(): keeps 'Wed'
+                                "#b91c1c" if t["overdue"] else "#b45309"))
+        if weather.line(cal.get("weather")):
+            body.append(day_row("Weather", weather.line(cal.get("weather"))))
+        for w in warnings_of(cal):
+            body.append(day_row("⚠️ Signal", w, "In force now (Hong Kong Observatory)"))
         if cal["upcoming"]:
-            amber = "#b45309"
-            body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {amber};'
-                        f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
-                        f'color:{amber}">Coming up, needs preparing &middot; {len(cal["upcoming"])}</div>')
+            body.append(heading("Coming up, needs preparing", "#b45309", len(cal["upcoming"])))
             for ev in cal["upcoming"]:
-                body.append(event_row(f"{ev['start']:%a %-d %b}, {agenda.days_away(ev, cal['day'])}", ev,
-                                      agenda.when(ev, ev["start"].date())))
+                time_txt = agenda.when(ev, ev["start"].date())
+                body.append(day_row(f"{ev['start']:%a %-d %b}", f"{time_txt} · {title_of(ev)}",
+                                    f"Prepare: {ev['prep']}" if ev["prep"] else "",
+                                    left_note=agenda.days_away(ev, cal["day"])))
     if jobs:  # then: the point of the whole job hunt
-        teal = "#0d9488"
-        body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {teal};'
-                    f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
-                    f'color:{teal}">Jobs worth applying to &middot; {len(jobs)}</div>')
+        body.append(heading("Jobs worth applying to", "#0d9488", len(jobs)))
         for j in jobs:
             title = e(j["title"])
             if j["url"]:  # only links the screener checked point at the sending job board
-                title = f'<a href="{e(j["url"])}" style="color:#111827;text-decoration:underline">{title}</a>'
+                title = (f'<a class="eo-text" href="{e(j["url"])}" style="color:#111827;'
+                         f'text-decoration:underline">{title}</a>')
             if is_commission(j):
-                title += (' <span style="padding:1px 7px;border-radius:9px;background:#b453091a;'
-                          'color:#b45309;font-size:11px;font-weight:600">likely commission-based</span>')
+                title += badge("likely commission-based", "#b45309")
             where = " &middot; ".join(e(x) for x in (j["company"], j["location"],
                                                     f"closes {j['closing']}" if j["closing"] else "") if x)
-            body.append(
-                '<div style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
-                f'<div style="font-size:15px;font-weight:600;color:#111827;line-height:1.35">{title}</div>'
-                f'<div style="font-size:13px;color:#4b5563;margin-top:2px">{where}</div>'
-                f'<div style="font-size:13px;color:#6b7280;margin-top:3px">{e(j["reason"] or "")}</div>'
-                '</div>')
-    for key, heading, colour in GROUPS:
+            body.append(item(title, where, e(j["reason"] or "")))
+    for key, heading_text, colour in GROUPS:
         if not g[key]:
             continue
-        body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {colour};'
-                    f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
-                    f'color:{colour}">{e(heading)} &middot; {len(g[key])}</div>')
+        body.append(heading(heading_text, colour, len(g[key])))
         singles, groups = collapse(g[key]) if key == "read" else (g[key], [])
         for r in singles:
-            badge = ""
-            if r["needs_reply"] and key == "job":
-                badge = (' <span style="padding:1px 7px;border-radius:9px;background:#d977061a;'
-                         'color:#d97706;font-size:11px;font-weight:600">needs reply</span>')
-            if has_draft(r):
-                badge += (' <span style="padding:1px 7px;border-radius:9px;background:#7c3aed1a;'
-                          'color:#7c3aed;font-size:11px;font-weight:600">draft ready</span>')
-            body.append(
-                '<div style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
-                f'<div style="font-size:15px;font-weight:600;color:#111827;line-height:1.35">'
-                f'{e(r["subject"] or "(no subject)")}{badge}</div>'
-                f'<div style="font-size:13px;color:#4b5563;margin-top:2px">{e(sender_name(r))}'
-                f' &middot; {e(r["account"])} &middot; {e(when(r))}</div>'
-                f'<div style="font-size:13px;color:#6b7280;margin-top:3px">{e(r["reason"] or "")}</div>'
-                '</div>')
+            badges = badge("needs reply", "#d97706") if r["needs_reply"] and key == "job" else ""
+            badges += badge("draft ready", "#7c3aed") if has_draft(r) else ""
+            body.append(item(e(r["subject"] or "(no subject)") + badges,
+                             f'{e(sender_name(r))} &middot; {e(r["account"])} &middot; {e(when(r))}',
+                             e(r["reason"] or "")))
         for name, rs in groups:
             accounts = ", ".join(sorted({r["account"] for r in rs}))
-            body.append(
-                '<div style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
-                f'<div style="font-size:15px;font-weight:600;color:#111827">{e(name)}'
-                f' <span style="padding:1px 8px;border-radius:9px;background:#6b72801a;color:#4b5563;'
-                f'font-size:12px;font-weight:600">{len(rs)} emails</span></div>'
-                f'<div style="font-size:13px;color:#4b5563;margin-top:2px">{e(accounts)}'
-                f' &middot; latest {e(when(rs[0]))}</div>'
-                f'<div style="font-size:13px;color:#6b7280;margin-top:3px">{e(group_subjects(rs))}</div>'
-                '</div>')
+            body.append(item(e(name) + badge(f"{len(rs)} emails", "#6b7280"),
+                             f'{e(accounts)} &middot; latest {e(when(rs[0]))}', e(group_subjects(rs))))
 
     routine = " &middot; ".join(f"{n} {e(name)}" for name, n in g["counts"].items() if n)
-    footer = (f'<div style="margin-top:22px;padding:12px 14px;border-radius:8px;background:#f6f7f9;'
-              f'font-size:13px;color:#4b5563">Everything else: {routine or "none"}'
-              + (f'<div style="margin-top:4px">{e(moved_line(rows))}</div>' if moved_line(rows) else "")
-              + "".join(f'<div style="margin-top:4px">{e(n)}</div>'
-                        for n in ([failed_note(len(g["unlabelled"]))] if g["unlabelled"] else [])
-                        + list(notes) + cal_note(cal))
-              + '</div>')
+    extra = ([moved_line(rows)] if moved_line(rows) else []) + \
+        ([failed_note(len(g["unlabelled"]))] if g["unlabelled"] else []) + list(notes) + cal_note(cal)
+    footer = ('<div class="eo-box" style="margin-top:22px;padding:12px 14px;border-radius:8px;'
+              f'background:#f6f7f9;font-size:13px;color:#4b5563">Everything else: {routine or "none"}'
+              + "".join(f'<div style="margin-top:4px">{e(n)}</div>' for n in extra) + '</div>')
     stamp = datetime.now().strftime("%a %d %b &middot; %H:%M")
 
-    return (f'<div style="font-family:{font};max-width:600px;margin:0 auto;padding:8px 4px;color:#111827">'
-            f'<div style="font-size:13px;color:#6b7280">{stamp}</div>'
-            f'<div style="font-size:22px;font-weight:700;margin:2px 0 10px">Mail summary</div>'
+    return ('<!doctype html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<meta name="color-scheme" content="light dark">'
+            '<meta name="supported-color-schemes" content="light dark">'
+            f'<style>:root{{color-scheme:light dark}}{dark_css()}</style></head>'
+            '<body class="eo-body" style="margin:0;padding:0;background:#ffffff;color:#111827">'
+            f'<div class="eo-body" style="font-family:{font};max-width:600px;margin:0 auto;padding:8px 4px;'
+            'background:#ffffff;color:#111827">'
+            f'<div class="eo-sub" style="font-size:13px;color:#6b7280">{stamp}</div>'
+            '<div style="font-size:22px;font-weight:700;margin:2px 0 10px">Mail summary</div>'
             f'<div>{chips}</div>'
-            f'<div style="font-size:13px;color:#6b7280">{len(rows)} new emails since the last summary</div>'
+            f'<div class="eo-sub" style="font-size:13px;color:#6b7280">{len(rows)} new emails since the last summary</div>'
             + "".join(body) + footer +
-            '<div style="margin-top:14px;font-size:12px;color:#9ca3af">'
-            f'{e(footer_line(rows))}</div></div>')
+            '<div class="eo-faint" style="margin-top:14px;font-size:12px;color:#9ca3af">'
+            f'{e(footer_line(rows))}</div></div></body></html>')
+
+
+def title_of(item: dict) -> str:
+    """An event's or reminder's short label (shorten.py) if it has one, else its own title."""
+    return item.get("short") or item.get("title") or "(no title)"
+
+
+def short(text: str, limit: int = 80) -> str:
+    """One line, at most `limit` characters (Telegram brief)."""
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def start_time(ev: dict) -> str:
+    """'10:25 PM' or 'All day'."""
+    return "All day" if ev["allday"] else f"{agenda.clock(ev['start'])} {ev['start']:%p}"
+
+
+def today_brief(cal) -> dict | None:
+    """The morning brief that rides on the 08:00 Telegram message.
+
+    21 Nov, after Sid's first look ("too stacked", "a bit long"): one section per kind of thing,
+    each with a bold heading and a blank line before the next; one short line per item, using
+    the short labels from shorten.py; times and dates come from the calendar and Reminders
+    themselves. Names and dates only (Sid's rule, 20 Nov), never anything from an email.
+    Telegram HTML formatting, so every piece of text is escaped.
+    {'sections': [...], 'loud': bool}, or None when there's no morning view (evening runs)."""
+    if not cal:
+        return None
+    e = html.escape
+    day, events = cal["day"], cal["events"] or []
+
+    def label(item):
+        return e(short(title_of(item), 60))
+
+    sections = [f"<b>{e(day.strftime('%A %-d %b'))}</b>"]
+    if cal["events"] is None:
+        cal_lines = ["Couldn't read the calendar"]
+    elif not events:
+        cal_lines = ["Nothing on the calendar"]
+    else:
+        cal_lines = [f"{e(agenda.when(ev, day).replace(' – ', '–'))} · {label(ev)}" for ev in events[:8]]
+        cal_lines += [f"+{len(events) - 8} more"] if len(events) > 8 else []
+    sections.append("<b>📅 Calendar</b>\n" + "\n".join(cal_lines))
+    if cal.get("todo"):
+        sections.append("<b>✅ To do</b>\n" + "\n".join(
+            f"{label(t)} · {e(reminders.when(t, day, compact=True))}" for t in cal["todo"]))
+    elif "todo" in cal and cal["todo"] is None:
+        sections.append("<b>✅ To do</b>\nCouldn't read Reminders")
+    if cal["upcoming"]:
+        rows = []
+        for ev in cal["upcoming"][:3]:
+            date_txt = ev["start"].strftime("%a %-d %b")
+            rows.append(f"{e(date_txt)} ({e(agenda.days_away(ev, day))}) · {e(start_time(ev))} · {label(ev)}")
+            prep = ev.get("prep_short") or ev.get("prep")
+            if prep:
+                rows.append(f"↳ {e(short(prep, 60))}")
+        sections.append("<b>⏳ Coming up</b>\n" + "\n".join(rows))
+    sky = weather.line(cal.get("weather"), brief=True)
+    if sky or warnings_of(cal):
+        sections.append("<b>🌤 Weather</b>\n" + "\n".join(
+            ([e(sky)] if sky else []) + [f"⚠️ {e(w)}" for w in warnings_of(cal)]))
+    busy = bool(events or cal.get("todo") or cal["upcoming"] or warnings_of(cal))
+    return dict(sections=sections, loud=busy)
 
 
 def deliver(subject: str, text: str, html_body: str) -> None:
@@ -427,6 +555,8 @@ def main() -> None:
                         help="preview with the last 48h of mail; never marks anything as summarised")
     parser.add_argument("--force", action="store_true",
                         help="run even if this 08:00/18:00 summary was already delivered")
+    parser.add_argument("--morning", action="store_true",
+                        help="with --sample: show the 08:00 view (calendar, reminders, weather) at any hour")
     args = parser.parse_args()
     # Wait for a running 15-minute check to finish (up to 15 min), so the two never label or
     # draft the same email. If it's somehow still running, go ahead: a late summary is worse.
@@ -436,7 +566,8 @@ def main() -> None:
         if args.live and not args.sample:
             summarise_recorded("digest", force=args.force)
         else:
-            summarise(args.live, args.sample)
+            morning = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+            summarise(args.live, args.sample, slot=morning if args.morning else None)
 
 
 def summarise_recorded(via: str, now: datetime | None = None, force: bool = False) -> bool:
@@ -456,6 +587,7 @@ def summarise_recorded(via: str, now: datetime | None = None, force: bool = Fals
         slots.record(db, slot, now, via, error=e)
         raise
     slots.record(db, slot, now, via)
+    store.backup(db)   # once a day (the first real run of the day); never raises
     return True
 
 
@@ -504,7 +636,7 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
         print("No new emails: no summary this time.")
         if live and not sample:
             mark_done(db, too_old)
-            notify.ping(ping_counts(recent), 0, DELIVER_TO)  # still ping: silence would mean "broken"
+            notify.ping(ping_counts(recent), 0, DELIVER_TO, today_brief(cal))  # still ping: silence would mean "broken"
         return (None if sample else db), live
 
     subject = subject_line(sections(recent), len(recent), jobs, cal)
@@ -513,7 +645,7 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
     print(f"\nSubject: {subject}\n\n{text}\n")
 
     preview = paths.PREVIEW
-    preview.write_text(f"<!doctype html><meta charset='utf-8'><body style='background:#fff'>{html_body}")
+    preview.write_text(html_body)   # already a whole HTML document
     if live:
         deliver(subject, text, html_body)
         if not sample:
@@ -522,7 +654,7 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
             learn.mark_shown(db)
             unsub_folder.mark_shown(db)
         print(f"Delivered to your {DELIVER_TO} inbox.")
-        notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO)  # after delivery; can't undo it
+        notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO, today_brief(cal))  # after delivery
         if jobs and not sample:
             try:   # each good job with feedback buttons (feedback.py); never stops the summary
                 print(f"Telegram: {feedback.send_jobs(db, jobs)} job(s) sent with buttons")
@@ -530,8 +662,8 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
                 print(f"Job buttons FAILED (summary unaffected; retried with the next summary's jobs only): {e}")
     else:
         print(f"(dry run: nothing delivered. HTML preview: {preview})")
-        text, loud = notify.message(ping_counts(recent, jobs), len(recent), DELIVER_TO)
-        print(f"(dry run: Telegram ping not sent; it would say: {text}{'' if loud else '  [no sound]'})")
+        text, loud = notify.message(ping_counts(recent, jobs), len(recent), DELIVER_TO, today_brief(cal))
+        print(f"(dry run: Telegram ping not sent; it would say: {notify.plain(text)}{'' if loud else '  [no sound]'})")
         if sample:
             subprocess.run(["open", str(preview)])  # show it in your browser
     return (None if sample else db), live

@@ -207,7 +207,7 @@ def test_learning_failure_never_stops_the_summary(db, monkeypatch, capsys):
 
 def test_rule_picks_are_job_shaped_and_skip_alert_digests():
     from email_organiser.grow_testset import is_rule_pick
-    assert is_rule_pick("lseg@myworkday.com", "Workday", "Your update")          # application system
+    assert is_rule_pick("acme@myworkday.com", "Workday", "Your update")          # application system
     assert is_rule_pick("hr@bank.test", "Bank", "Interview invitation")          # job word
     assert is_rule_pick("hr@bank.test", "Bank", "面試邀請")
     assert not is_rule_pick("jobalerts-noreply@linkedin.com", "LinkedIn Job Alerts", "Interview tips")

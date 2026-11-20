@@ -143,7 +143,7 @@ def test_summary_run_replays_20_nov(db, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(digest.paths, "PREVIEW", tmp_path / "preview.html")
     delivered, pings = [], []
     monkeypatch.setattr(digest, "deliver", lambda s, t, h: delivered.append((s, t)))
-    monkeypatch.setattr(notify, "send", lambda text, loud: pings.append((text, loud)))
+    monkeypatch.setattr(notify, "send", lambda text, loud, **k: pings.append((text, loud)))   # **k: html_mode in the morning
     digest.summarise(live=True, sample=False)
 
     subject, text = delivered[0]

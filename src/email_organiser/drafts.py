@@ -36,6 +36,16 @@ SIGN_OFF = "Sidrian"
 MAX_AGE_HOURS = 48                        # no drafts for old mail (e.g. the test-set backlog)
 NO_DRAFT = {"spam", "promo", "newsletter"}  # never drafted, even if Claude says "needs reply"
 BATCH_SIZE = 10
+# Senders that can't receive a reply (21 Nov): the only real draft so far answered
+# "WorkdaySystemDoNotReply <company@myworkday.com>". The address there is plain, so the
+# display name is checked too.
+NO_REPLY = re.compile(r"no[-_. ]?reply|do[-_. ]?not[-_. ]?reply", re.IGNORECASE)
+
+
+def is_no_reply(sender: str) -> bool:
+    """True if the name or the address says a reply goes nowhere ('noreply@', 'DoNotReply')."""
+    name, address = parseaddr(sender or "")
+    return bool(NO_REPLY.search(name) or NO_REPLY.search(address.split("@")[0]))
 
 SYSTEM_PROMPT = f"""You draft email replies for {SIGN_OFF}, a recent graduate job hunting in Hong Kong and London.
 He reads every draft and sends it himself, so a draft with honest gaps beats a confident guess.
@@ -80,8 +90,10 @@ def pending(db, sample: bool = False, only: set | None = None) -> list:
         WHERE c.needs_reply = 1 AND (d.uid IS NULL OR ?)
     """, (sample,)).fetchall()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
-    # The model labels; the code acts (design rule 4): junk never gets a draft.
-    rows = [r for r in rows if r["label"] not in NO_DRAFT and (sample or arrived(r) >= cutoff)]
+    # The model labels; the code acts (design rule 4): junk never gets a draft, and nor does
+    # mail from an address that can't receive a reply.
+    rows = [r for r in rows if r["label"] not in NO_DRAFT and (sample or arrived(r) >= cutoff)
+            and not is_no_reply(r["sender"])]
     if only is not None:   # the 15-minute check drafts only the emails it is alerting about
         rows = [r for r in rows if (r["account"], r["uidvalidity"], r["uid"]) in only]
     return rows
@@ -122,7 +134,7 @@ def build_draft(from_addr: str, row, original: dict, body: str) -> EmailMessage:
     In-Reply-To and References are what make Mail.app show the draft inside the
     original conversation.
     """
-    to = one_line(original.get("reply_to") or row["sender"])
+    to = reply_address(row, original)
     message_id = one_line(row["message_id"])
     msg = EmailMessage()
     msg["From"] = from_addr
@@ -135,6 +147,11 @@ def build_draft(from_addr: str, row, original: dict, body: str) -> EmailMessage:
         msg["References"] = " ".join(x for x in (one_line(original.get("references")), message_id) if x)
     msg.set_content(body)
     return msg
+
+
+def reply_address(row, original: dict) -> str:
+    """Where a reply would go: Reply-To if the email set one, else the sender."""
+    return one_line(original.get("reply_to") or row["sender"])
 
 
 def original_headers(client, uid: int) -> dict | None:
@@ -178,6 +195,9 @@ def save_drafts(db, rows: list, bodies: dict) -> int:
                 original = original_headers(client, r["uid"])
                 if original is None:
                     print(f"  [{name}] original gone from inbox; skipping uid {r['uid']}")
+                    continue
+                if is_no_reply(reply_address(r, original)):   # e.g. Reply-To: noreply@...
+                    print(f"  [{name}] replies go to a no-reply address; no draft for uid {r['uid']}")
                     continue
                 msg = build_draft(account["username"], r, original,
                                   bodies[(name, r["uidvalidity"], r["uid"])])

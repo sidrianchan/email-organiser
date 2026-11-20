@@ -61,6 +61,8 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `cleanup.py` | Moves recent spam, promos and newsletters to `Assistant-Review` (never job mail, anything needing a reply, or job-board alerts) |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
 | `agenda.py` | Reads macOS Calendar (read-only) for the 08:00 summary: today's events, plus anything in the next 7 days that needs preparing. Claude judges each event once (true/false + a prep note), so most mornings make no Claude call |
+| `reminders.py`, `weather.py` | The rest of the morning brief: Apple Reminders due today or overdue (read-only), and the Hong Kong Observatory's forecast and plan-changing warning signals (open data API, only while the Mac is set to Hong Kong time). No Claude calls |
+| `shorten.py` | Short labels for long titles in the brief ("Flight JL026 to Tokyo" instead of a booking string). One remembered Claude call per new title; a label may not contain any number that isn't in the original, and an event's label never repeats the time |
 | `watch.py` | The 15-minute check: new job or needs-reply mail → draft → instant counts-only ping. No new mail = no Claude call |
 | `runlock.py` | Makes sure the quick check and the summary never run at the same time |
 | `slots.py` | Records whether each 08:00 / 18:00 summary was delivered, so the quick check can run a missed one (catch-up) |
@@ -107,6 +109,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 - **Six job emails proved nothing.** "Job 6/6" sounds perfect, but its honest 95% range was 54–100%. I hand-labelled 37 more from my job season, picked by plain rules plus a random sample (never by Claude, which would only pick the job emails it already recognises). Job recall became 16/19, and two real misses surfaced: a live application update and a recruiter thread, both filed as routine.
 - **Scores wobble, so the gate judges per email.** The same 50 emails scored 44/50 one night and 43/50 an hour later. Re-running only the job emails gave the same answer three times, so the wobble comes from which other emails share a batch. A total-based "keep if the score doesn't drop" rule would have rejected a fix that caught 19/19 job emails in every run. `gate.py` now runs old and new instructions 3 times each and keeps a change only if no job email is lost in every run and at least one is gained in every run.
 - **Sender lists are brittle.** LinkedIn sends job alerts from three different addresses; the dry run caught one I'd missed (a "… are hiring" email) before anything moved.
+- **The only real reply draft answered a no-reply address.** After five days live, the one draft written for real mail replied to "WorkdaySystemDoNotReply", an assessment invitation that needed an action, not a reply. The address itself looked ordinary (the company's name at the Workday domain); only the display name said so. Drafts now skip any sender or Reply-To whose name or address says no-reply.
 
 ## Setup
 
@@ -136,9 +139,12 @@ scripts/install-schedule.sh
 uv run python -m email_organiser.notify setup
 ```
 
-The Telegram ping carries counts only ("1 job, 2 to read"), never senders or subjects,
-because bot chats are not end-to-end encrypted. It is sent every run, even with no new
-mail, so a missing ping means the schedule broke. If Telegram fails, the summary is unaffected.
+The Telegram ping's mail line carries counts only ("1 job, 2 to read"), never senders or
+subjects, because bot chats are not end-to-end encrypted. It is sent every run, even with no
+new mail, so a missing ping means the schedule broke. If Telegram fails, the summary is unaffected.
+At 08:00 the ping also carries the day's brief, one section each for the calendar, to-dos,
+what's coming up, the weather and mail, with short labels for long titles. Those are names and
+dates I chose to allow; email text never goes to Telegram. The summary email follows Mail's dark mode.
 
 Unsubscribing: drag the email into the `Unsubscribe` folder of any account (Mail.app or iPhone).
 Within 15 minutes a ping gives the counts, and the next summary lists what happened. Fallback:
@@ -164,10 +170,11 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 7 | Learns from my corrections, re-measured weekly (prompt examples and reply style once ~10 corrections exist) | ✓ |
 | 8 | Calendar in the 08:00 summary: today, plus a 7-day countdown for events that need preparing | ✓ |
 | 8.5 | Catch-up: a summary missed while the Mac slept is run at the next quick check | ✓ |
+| 8.6 | Morning brief: Apple Reminders due + Hong Kong weather warnings, in the summary and the 08:00 Telegram message; dark-mode summary; no drafts to no-reply senders; daily database backup | ✓ |
 
 ## How this was built
 
-Built with an AI pair-programmer (Claude Code). Each milestone ended with me explaining its design back, answering questions on why it works the way it does, before it was merged.
+Built with an AI pair-programmer (Claude Code): Claude wrote and tested the code; I made the design decisions, labelled the test sets and ran it on my own mail. I'm explaining each milestone back, unaided, as I go. So far: milestones 0, 1 and 3 and the Telegram ping (with corrections); 4, 5b and 6 partly; the rest are still to do.
 
 ## License
 

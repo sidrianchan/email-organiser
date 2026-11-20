@@ -107,8 +107,8 @@ def test_only_promo_and_newsletter_are_offered_never_spam_job_or_reply(db):
 
 
 def test_one_job_email_from_the_same_sender_blocks_the_offer(db):
-    add(db, 1, "Workday <lseg@myworkday.com>", "newsletter", unsub=SIGNED)
-    add(db, 2, "Workday <lseg@myworkday.com>", "job", unsub=SIGNED)
+    add(db, 1, "Workday <acme@myworkday.com>", "newsletter", unsub=SIGNED)
+    add(db, 2, "Workday <acme@myworkday.com>", "job", unsub=SIGNED)
     assert u.candidates(db)[0] == []
 
 

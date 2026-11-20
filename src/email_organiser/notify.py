@@ -1,8 +1,12 @@
 """Phone ping after each summary, through a Telegram bot.
 
-The ping carries COUNTS ONLY, never anything from an email (no senders, no subjects).
-Telegram can read bot chats (they are not end-to-end encrypted), so nothing personal
-goes there. The full summary stays in your inbox; the ping just tells you to look.
+The mail part carries COUNTS ONLY, never anything from an email (no senders, no subjects).
+Telegram can read bot chats (they are not end-to-end encrypted), so email text never goes
+there. The full summary stays in your inbox; the ping just tells you to look.
+
+Since 21 Nov the 08:00 ping also carries the day's brief (digest.today_brief): event and
+reminder titles, times, what to prepare, Hong Kong weather. Sid's rule from 20 Nov allows
+names and dates in Telegram; email text is still never sent.
 
     "18:00 mail: 1 job, 1 to reply. Check Yahoo."      -> arrives with sound
     "18:00 mail: nothing needs you (7 routine)."        -> arrives without sound
@@ -21,7 +25,9 @@ If Telegram is down or not set up, the summary still goes to your inbox (ping() 
 Still no email-sending code anywhere: this talks to Telegram, not to a mail server.
 """
 import getpass
+import html
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -36,9 +42,31 @@ TOKEN_KEY = "telegram"
 API = "https://api.telegram.org/bot{token}/{method}"
 
 
-def message(counts: dict, total: int, account: str) -> tuple[str, bool]:
+def message(counts: dict, total: int, account: str, today: dict | None = None) -> tuple[str, bool]:
     """(text, loud). counts has 'job', 'reply', 'read' (and optionally 'jobs': good jobs
-    found by the screener) as numbers. No email content goes in."""
+    found by the screener) as numbers. No email content goes in.
+    today: the morning brief {'sections': [...], 'loud': bool} (digest.today_brief). Then the
+    message is Telegram HTML: the brief's sections, then a Mail section, a blank line between."""
+    text, loud = mail_line(counts, total, account)
+    if today and today.get("sections"):
+        body = text.split(" mail: ", 1)[-1]               # '08:00 mail: 1 job. Check Yahoo.' -> '1 job. ...'
+        mail = f"<b>📬 Mail</b>\n{html.escape(body[:1].upper() + body[1:])}"
+        return "\n\n".join(today["sections"] + [mail]), loud or bool(today.get("loud"))
+    return text, loud
+
+
+def is_html(today: dict | None) -> bool:
+    """The morning message is formatted (bold headings); every other ping is plain text."""
+    return bool(today and today.get("sections"))
+
+
+def plain(text: str) -> str:
+    """The formatted message without its formatting, for logs and as a fallback."""
+    return html.unescape(re.sub(r"</?b>", "", text))
+
+
+def mail_line(counts: dict, total: int, account: str) -> tuple[str, bool]:
+    """The counts-only mail line, e.g. '08:00 mail: 1 job, 3 to read. Check Yahoo.'"""
     stamp = datetime.now().strftime("%H:%M")
     if total == 0:
         return f"{stamp} mail: no new email.", False
@@ -77,21 +105,36 @@ def call(token: str, method: str, payload: dict | None = None) -> dict:
     return reply["result"]
 
 
-def send(text: str, loud: bool) -> None:
+def send(text: str, loud: bool, html_mode: bool = False) -> None:
+    """html_mode: text uses Telegram's HTML formatting (only <b> here). If Telegram can't read
+    the formatting, the same message goes again as plain text rather than not at all."""
     token = keyring.get_password(SERVICE, TOKEN_KEY)
     if not token or not paths.TELEGRAM_CHAT.exists():
         raise RuntimeError("Telegram not set up (run: python -m email_organiser.notify setup)")
     chat_id = int(paths.TELEGRAM_CHAT.read_text().strip())
     # disable_notification: the notification still shows, just without sound (Telegram docs).
-    call(token, "sendMessage", {"chat_id": chat_id, "text": text, "disable_notification": not loud})
-
-
-def ping(counts: dict, total: int, account: str) -> bool:
-    """Send the ping; on any failure print why and carry on. Returns True if it was sent."""
-    text, loud = message(counts, total, account)
+    payload = {"chat_id": chat_id, "text": text, "disable_notification": not loud}
+    if not html_mode:
+        call(token, "sendMessage", payload)
+        return
     try:
-        send(text, loud)
-        print(f"Telegram ping sent{'' if loud else ' (no sound)'}: {text}")
+        call(token, "sendMessage", payload | {"parse_mode": "HTML", "link_preview_options": {"is_disabled": True}})
+    except RuntimeError as e:
+        if "parse" not in str(e).lower():   # e.g. "can't parse entities"; anything else is a real failure
+            raise
+        print(f"Telegram couldn't read the formatting ({e}); sending it plain")
+        call(token, "sendMessage", payload | {"text": plain(text)})
+
+
+def ping(counts: dict, total: int, account: str, today: dict | None = None) -> bool:
+    """Send the ping; on any failure print why and carry on. Returns True if it was sent."""
+    text, loud = message(counts, total, account, today)
+    try:
+        if is_html(today):
+            send(text, loud, html_mode=True)
+        else:
+            send(text, loud)
+        print(f"Telegram ping sent{'' if loud else ' (no sound)'}: {plain(text)}")
         return True
     except Exception as e:
         print(f"Telegram ping FAILED (summary unaffected): {e}")
