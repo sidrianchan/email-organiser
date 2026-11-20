@@ -1,10 +1,12 @@
 #!/bin/bash
-# Install (or reinstall) the schedule: 08:00 / 18:00 summary + 15-minute quick check.
+# Install (or reinstall) the schedule: 08:00 / 18:00 summary, 15-minute quick check,
+# and job-button taps collected every minute.
 #
 # The schedule runs a STABLE copy of the code (a git worktree on the `live` branch),
 # so half-finished work on a feature branch never runs unattended.
 #
 #   scripts/install-schedule.sh            # set up the stable copy + schedule
+#   JOBS=feedback scripts/install-schedule.sh   # (re)install only some of the jobs
 #   scripts/update-live.sh                 # later: move the stable copy to the latest main
 set -euo pipefail
 
@@ -22,9 +24,10 @@ if [ ! -d "$LIVE" ]; then
 fi
 
 # 2. Fill in each template and hand it to launchd:
-#    digest = the 08:00 / 18:00 summary; watch = the 15-minute check (milestone 6).
+#    digest = the 08:00 / 18:00 summary; watch = the 15-minute check (milestone 6);
+#    feedback = job-button taps, every minute (feedback.py).
 mkdir -p "$HOME/Library/LaunchAgents" "$DATA/logs"
-for JOB in digest watch; do
+for JOB in ${JOBS:-digest watch feedback}; do
     AGENT="$HOME/Library/LaunchAgents/com.email-organiser.$JOB.plist"
     sed -e "s|__UV__|$UV|" -e "s|__CODE_DIR__|$LIVE|" \
         -e "s|__PATH__|$CLAUDE_DIR:/usr/bin:/bin:/usr/sbin:/sbin|" \
@@ -35,5 +38,5 @@ for JOB in digest watch; do
     launchctl load "$AGENT"
 done
 
-echo "Schedule installed: summary at 08:00 and 18:00, quick check every 15 min, running $LIVE"
+echo "Schedule installed (${JOBS:-digest watch feedback}): summary at 08:00 and 18:00, quick check every 15 min, job taps every minute, running $LIVE"
 echo "Logs: $DATA/logs/digest.log, $DATA/logs/watch.log"

@@ -132,3 +132,22 @@ def test_report(db, tg):
     tg.updates = [tap(1, "i", 1)]
     feedback.collect(db)
     assert feedback.report(db) == "high: 1 not interested"
+
+
+def test_tapping_the_same_button_twice_is_fine(db, tg, monkeypatch, capsys):
+    feedback.send_jobs(db, [add_job(db)])
+    def call(token, method, payload=None):
+        if method == "editMessageReplyMarkup":
+            raise RuntimeError("Telegram said: Bad Request: message is not modified: ...")
+        return tg(token, method, payload)
+    monkeypatch.setattr(feedback.notify, "call", call)
+    tg.updates = [tap(1, "a", 1), tap(2, "a", 1)]
+    assert feedback.collect(db) == 2
+    assert "not handled" not in capsys.readouterr().out
+
+
+def test_the_quick_check_no_longer_reads_taps():
+    """One reader only (the every-minute job), so two never race for the same taps."""
+    import inspect
+    from email_organiser import watch
+    assert "feedback" not in inspect.getsource(watch)

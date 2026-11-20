@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd = macOS's built-in scheduler. This tells it: "every minute, collect your taps on
+  the job buttons in Telegram" (feedback.py), so a tap is ticked within a minute instead of
+  waiting for the 15-minute check. One quick HTTPS call; no Claude, no email.
+  Don't edit the __PLACEHOLDERS__: scripts/install-schedule.sh fills them in.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.email-organiser.feedback</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV__</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>email_organiser.feedback</string>
+        <string>collect</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__CODE_DIR__</string>
+
+    <!-- launchd starts with an almost empty PATH; this lets the script find `claude`. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>__LOG__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG__</string>
+</dict>
+</plist>

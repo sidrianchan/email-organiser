@@ -15,7 +15,8 @@ link. These are public job ads, not your email. Nothing from any other email goe
 Link previews are switched off, so Telegram's servers never open the link (job-board links can
 carry tracking).
 
-The 15-minute check collects taps (getUpdates). Only taps from your own chat count.
+A small launchd job collects taps every minute (`feedback collect`, getUpdates); it is the only
+reader, so two readers never race. Only taps from your own chat count.
 
     python3 -m uv run python -m email_organiser.feedback backlog          (dry run: what would be sent)
     python3 -m uv run python -m email_organiser.feedback backlog --live   (send past jobs to mark)
@@ -165,21 +166,19 @@ def collect(db) -> int:
                     stored += 1
                     m = ans["message"]
                     if m.get("message_id"):   # tick the chosen button
-                        notify.call(token, "editMessageReplyMarkup", {
-                            "chat_id": chat_id, "message_id": m["message_id"],
-                            "reply_markup": keyboard(ans["msg_id"], ans["verdict"])})
+                        try:
+                            notify.call(token, "editMessageReplyMarkup", {
+                                "chat_id": chat_id, "message_id": m["message_id"],
+                                "reply_markup": keyboard(ans["msg_id"], ans["verdict"])})
+                        except RuntimeError as e:   # the same button tapped twice: already ticked
+                            if "not modified" not in str(e):
+                                raise
         except Exception as e:   # one bad update must not block the rest
             print(f"Job feedback: one tap not handled ({e})")
         OFFSET.write_text(str(u["update_id"] + 1))   # read: Telegram won't send it again
     if stored:
         print(f"Job feedback: {stored} tap(s) stored")
     return stored
-
-
-def step(db, live: bool) -> None:
-    """For the 15-minute check. Never raises."""
-    if live:
-        collect(db)
 
 
 def backlog(db) -> list:

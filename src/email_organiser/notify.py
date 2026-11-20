@@ -23,6 +23,7 @@ Still no email-sending code anywhere: this talks to Telegram, not to a mail serv
 import getpass
 import json
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime
 
@@ -63,6 +64,12 @@ def call(token: str, method: str, payload: dict | None = None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             reply = json.load(resp)
+    except urllib.error.HTTPError as e:   # Telegram explains a 400 in the body: keep that
+        try:
+            why = json.load(e).get("description", "")
+        except Exception:
+            why = ""
+        raise RuntimeError(f"Telegram said: {why or e}".replace(token, "<token>")) from None
     except Exception as e:  # scrub the token in case a library ever puts the URL in the message
         raise RuntimeError(str(e).replace(token, "<token>")) from None
     if not reply.get("ok"):
