@@ -152,7 +152,6 @@ def main() -> None:
     parser.add_argument("--compare", nargs=2, metavar=("OLD", "NEW"))
     args = parser.parse_args()
     db = store.open_db()
-    screener.resolve_tracked = lambda url, sender: ""   # links don't matter here: no web requests
     if args.fetch:
         print(f"{fetch(db)} alerts saved in {TESTSET}")
         return

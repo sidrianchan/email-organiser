@@ -34,7 +34,7 @@ MAX_MOVES = 30
 # A domain matches itself and its subdomains (e.jobsdb.com matches jobsdb.com).
 JOB_BOARD_DOMAINS = (
     "jobsdb.com", "ctgoodjobs.hk", "recruit.com.hk", "indeed.com", "glassdoor.com",
-    "efinancialcareers.com", "targetconnect.com", "gradcracker.com", "prospects.ac.uk",
+    "efinancialcareers.com", "gradcracker.com", "prospects.ac.uk",
     "brightnetwork.co.uk", "targetjobs.co.uk", "reed.co.uk", "totaljobs.com",
 )
 # LinkedIn sends social notifications too (updates-, invitations@), so only the

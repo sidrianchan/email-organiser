@@ -23,8 +23,6 @@ import email
 import html
 import json
 import re
-import urllib.error
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.utils import parseaddr
@@ -199,43 +197,6 @@ def safe_link(url: str, sender: str) -> str:
     return ""
 
 
-# Senders whose job links all go through a mail-tracking redirector on another site. For these
-# only, the code follows ONE redirect hop (no further) and keeps the link if it lands on the
-# sender's own job board. Found 20 Nov: every QM Careers Hub job link was dropped this way.
-# Following the hop counts as a click in the sender's statistics; nothing else is sent.
-TRACKED = {  # sender's site -> (redirector host, sites the job link may land on, shape of a job link)
-    "targetconnect.com": ("mxm.mxmfb.com", {"targetconnect.net"}, re.compile(r"^/leap/jobs\.html\?id=\d+$")),
-}
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None   # don't follow: we read the Location header ourselves
-
-
-def resolve_tracked(url: str, sender: str) -> str:
-    """The job-board link behind a known tracking link, or '' (unknown sender, wrong place, error)."""
-    sender_site = site(parseaddr(sender or "")[1].rpartition("@")[2])
-    if sender_site not in TRACKED or not url.startswith("https://"):
-        return ""
-    redirector, allowed, job_link = TRACKED[sender_site]
-    if (urlparse(url).hostname or "").lower() != redirector:
-        return ""
-    try:
-        urllib.request.build_opener(_NoRedirect).open(url, timeout=10)
-        return ""   # no redirect at all: not a job link
-    except urllib.error.HTTPError as e:
-        location = e.headers.get("Location", "") if e.code in (301, 302, 303, 307, 308) else ""
-    except Exception:
-        return ""
-    target = urlparse(location)
-    if target.scheme not in ("http", "https") or site(target.hostname or "") not in allowed:
-        return ""
-    query = "&".join(q for q in target.query.split("&") if q and not q.startswith("utm_"))
-    path = target.path + (f"?{query}" if query else "")
-    return f"https://{target.hostname}{path}" if job_link.match(path) else ""   # e.g. not the "all jobs" page
-
-
 def norm(s: str) -> str:
     return re.sub(r"\W+", " ", (s or "").lower()).strip()
 
@@ -314,7 +275,7 @@ def screen(alerts: list[dict], profile: str, prompt: str | None = None, schema: 
                     continue
                 url = a["links"].get(j["link"].strip("[] "), "")  # Claude returns a tag, never a URL
                 sender = a["row"]["sender"]
-                jobs.append(j | {"url": safe_link(url, sender) or resolve_tracked(url, sender), "row": a["row"]})
+                jobs.append(j | {"url": safe_link(url, sender), "row": a["row"]})
         print(f"  screened {min(start + BATCH_SIZE, len(readable))}/{len(readable)} alerts ({used})")
     return jobs
 
