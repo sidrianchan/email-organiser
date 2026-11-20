@@ -7,6 +7,7 @@ goes there. The full summary stays in your inbox; the ping just tells you to loo
     "18:00 mail: 1 job, 1 to reply. Check Yahoo."      -> arrives with sound
     "18:00 mail: nothing needs you (7 routine)."        -> arrives without sound
     "18:00 mail: no new email."                          -> without sound; proves the schedule ran
+    "08:00 mail: ⚠️ 5 not labelled (Claude failed: run /login). Check Yahoo."  -> with sound
 
 A ping every run, even when nothing came in: if no ping arrives, the schedule broke.
 
@@ -41,14 +42,16 @@ def message(counts: dict, total: int, account: str) -> tuple[str, bool]:
     if total == 0:
         return f"{stamp} mail: no new email.", False
     good = counts.get("jobs", 0)
-    bits = [f"{good} good job{'s' if good > 1 else ''}" if good else "",
+    failed = counts.get("unlabelled", 0)
+    bits = [f"⚠️ {failed} not labelled (Claude failed: run /login)" if failed else "",
+            f"{good} good job{'s' if good > 1 else ''}" if good else "",
             f"{counts['job']} job" if counts["job"] else "",
             f"{counts['reply']} to reply" if counts["reply"] else "",
             f"{counts['read']} to read" if counts["read"] else ""]
     bits = [b for b in bits if b]
     if not bits:
         return f"{stamp} mail: nothing needs you ({total} routine).", False
-    loud = bool(counts["job"] or counts["reply"] or good)  # only these are worth a sound
+    loud = bool(counts["job"] or counts["reply"] or good or failed)  # only these are worth a sound
     return f"{stamp} mail: {', '.join(bits)}. Check {account.capitalize()}.", loud
 
 

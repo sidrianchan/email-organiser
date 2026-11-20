@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import agenda, cleanup, drafts, learn, notify, paths, screener, slots, store, unsub_folder
+from . import agenda, classify, cleanup, drafts, health, learn, notify, paths, screener, slots, store, unsub_folder
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -39,13 +39,14 @@ GROUP_AT = 3           # in "worth reading", 3+ emails from one sender collapse 
 
 
 def pending(db) -> tuple[list, list]:
-    """(recent, too_old): labelled emails that haven't been in a summary yet."""
+    """(recent, too_old): emails that haven't been in a summary yet. Unlabelled ones are
+    included (label None), so a Claude failure shows up instead of hiding mail (20 Nov)."""
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.date, m.first_seen,
                c.label, c.needs_reply, c.reason, dr.uid IS NOT NULL AS drafted,
                mv.uid IS NOT NULL AS moved
         FROM messages m
-        JOIN claude_labels c USING (account, uidvalidity, uid)
+        LEFT JOIN claude_labels c USING (account, uidvalidity, uid)
         LEFT JOIN digested d USING (account, uidvalidity, uid)
         LEFT JOIN drafts dr USING (account, uidvalidity, uid)
         LEFT JOIN moved mv USING (account, uidvalidity, uid)
@@ -60,6 +61,7 @@ def pending(db) -> tuple[list, list]:
 def sections(rows: list) -> dict:
     """Split emails into the summary's groups. Each email appears in one group only."""
     return {
+        "unlabelled": [r for r in rows if r["label"] is None],
         "job": [r for r in rows if r["label"] == "job"],
         "reply": [r for r in rows if r["needs_reply"] and r["label"] != "job"],
         "read": [r for r in rows if r["label"] == "read" and not r["needs_reply"]],
@@ -70,7 +72,7 @@ def sections(rows: list) -> dict:
 def ping_counts(rows: list, jobs: list = ()) -> dict:
     """Just the numbers for the Telegram ping: no subjects or senders leave the Mac."""
     g = sections(rows)
-    return {k: len(g[k]) for k in ("job", "reply", "read")} | {"jobs": len(jobs)}
+    return {k: len(g[k]) for k in ("unlabelled", "job", "reply", "read")} | {"jobs": len(jobs)}
 
 
 def collapse(rows: list) -> tuple[list, list]:
@@ -145,8 +147,20 @@ def cal_note(cal) -> list:
     return []
 
 
+def failed_bit(g: dict) -> str:
+    n = len(g.get("unlabelled", []))
+    return f"⚠️ {n} not labelled, Claude failed" if n else ""
+
+
 def subject_line(g: dict, total: int, jobs: list = (), cal=None) -> str:
     stamp = datetime.now().strftime("%a %H:%M")
+    if failed_bit(g):   # never "nothing needs you" when Claude didn't look
+        bits = [failed_bit(g), cal_bit(cal),
+                f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
+                f"{len(g['job'])} job" if g["job"] else "",
+                f"{len(g['reply'])} to reply" if g["reply"] else "",
+                f"{len(g['read'])} to read" if g["read"] else ""]
+        return f"Mail summary {stamp}: " + ", ".join(b for b in bits if b)
     lead = cal_bit(cal) + (", " if cal_bit(cal) else "")
     if jobs or g["job"] or g["reply"] or g["read"]:
         bits = [cal_bit(cal),
@@ -175,10 +189,29 @@ def job_line(j) -> str:
     return ", ".join(x for x in (j["title"], j["company"], j["location"], closing) if x)
 
 
+FAILED_HEADING = "Not labelled: Claude failed"
+
+
+def failed_note(n: int) -> str:
+    return (f"Claude couldn't label {n} email{'s' if n > 1 else ''} (listed at the top), so nothing "
+            "in them was checked. If Claude is logged out, run /login in Claude Code. They'll be "
+            "labelled and shown again in the next summary.")
+
+
+def footer_line(rows: list) -> str:
+    if any(r["label"] is None for r in rows):
+        return "Some emails were NOT labelled (see top). Nothing was deleted or sent."
+    return "Labelled by Claude. Nothing was deleted or sent."
+
+
 def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
     """Plain-text version, for mail apps that don't show HTML."""
     g = sections(rows)
     out = [f"{len(rows)} new emails since the last summary", ""]
+    if g["unlabelled"]:   # first: the summary can't vouch for these
+        out += [f"⚠️ {FAILED_HEADING.upper()} ({len(g['unlabelled'])})", "-" * 30]
+        for r in g["unlabelled"]:
+            out += [f"* {r['subject'] or '(no subject)'}", f"  {sender_name(r)} | {r['account']} | {when(r)}", ""]
     if cal and cal["events"] is not None:  # first: the shape of the day
         if cal["events"]:
             out += [f"{cal_heading(cal).upper()} ({len(cal['events'])})", "-" * 30]
@@ -219,8 +252,10 @@ def build_text(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
         out.append(f"Everything else: {routine}.")
     if moved_line(rows):
         out.append(moved_line(rows))
+    if g["unlabelled"]:
+        out.append(failed_note(len(g["unlabelled"])))
     out += list(notes) + cal_note(cal)   # e.g. the weekly labelling check (milestone 7)
-    out.append("\nLabelled by Claude. Nothing was deleted or sent.")
+    out.append("\n" + footer_line(rows))
     return "\n".join(out)
 
 
@@ -239,11 +274,24 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
                 f'border-radius:12px;background:{colour}1a;color:{colour};font-size:13px;'
                 f'font-weight:600">{e(text)}</span>')
 
-    chips = (chip(f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}", "#0d9488") if jobs else "") + \
+    chips = (chip(f"⚠️ {len(g['unlabelled'])} not labelled", "#dc2626") if g["unlabelled"] else "") + \
+        (chip(f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}", "#0d9488") if jobs else "") + \
         "".join(chip(f"{len(g[k])} {h.lower()}", c) for k, h, c in GROUPS if g[k])
     chips = chips or chip("Nothing needs you", "#6b7280")
 
     body = []
+    if g["unlabelled"]:   # first: the summary can't vouch for these
+        red = "#dc2626"
+        body.append(f'<div style="margin:22px 0 4px;padding-left:10px;border-left:4px solid {red};'
+                    f'font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;'
+                    f'color:{red}">{e(FAILED_HEADING)} &middot; {len(g["unlabelled"])}</div>')
+        for r in g["unlabelled"]:
+            body.append(
+                '<div style="padding:10px 0 10px 14px;border-bottom:1px solid #eef0f2">'
+                f'<div style="font-size:15px;font-weight:600;color:#111827;line-height:1.35">'
+                f'{e(r["subject"] or "(no subject)")}</div>'
+                f'<div style="font-size:13px;color:#4b5563;margin-top:2px">{e(sender_name(r))}'
+                f' &middot; {e(r["account"])} &middot; {e(when(r))}</div></div>')
     if cal and cal["events"] is not None:  # first: the shape of the day
         slate = "#475569"
         n = f" &middot; {len(cal['events'])}" if cal["events"] else ""
@@ -330,7 +378,9 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
     footer = (f'<div style="margin-top:22px;padding:12px 14px;border-radius:8px;background:#f6f7f9;'
               f'font-size:13px;color:#4b5563">Everything else: {routine or "none"}'
               + (f'<div style="margin-top:4px">{e(moved_line(rows))}</div>' if moved_line(rows) else "")
-              + "".join(f'<div style="margin-top:4px">{e(n)}</div>' for n in list(notes) + cal_note(cal))
+              + "".join(f'<div style="margin-top:4px">{e(n)}</div>'
+                        for n in ([failed_note(len(g["unlabelled"]))] if g["unlabelled"] else [])
+                        + list(notes) + cal_note(cal))
               + '</div>')
     stamp = datetime.now().strftime("%a %d %b &middot; %H:%M")
 
@@ -341,7 +391,7 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None) -> str:
             f'<div style="font-size:13px;color:#6b7280">{len(rows)} new emails since the last summary</div>'
             + "".join(body) + footer +
             '<div style="margin-top:14px;font-size:12px;color:#9ca3af">'
-            'Labelled by Claude. Nothing was deleted or sent.</div></div>')
+            f'{e(footer_line(rows))}</div></div>')
 
 
 def deliver(subject: str, text: str, html_body: str) -> None:
@@ -362,6 +412,8 @@ def deliver(subject: str, text: str, html_body: str) -> None:
 
 
 def mark_done(db, rows: list) -> None:
+    """Unlabelled emails stay pending (unless past MAX_AGE_HOURS), so the next summary shows
+    them again with their labels."""
     db.executemany("INSERT OR IGNORE INTO digested (account, uidvalidity, uid) VALUES (?, ?, ?)",
                    [(r["account"], r["uidvalidity"], r["uid"]) for r in rows])
     db.commit()
@@ -414,9 +466,17 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
     print(f"=== {datetime.now():%Y-%m-%d %H:%M} digest ({mode}) ===")
 
     db = store.open_db()
+    step_notes = []   # steps that failed this run, said in the summary instead of only in the log
     if sample:
         db.execute("CREATE TEMP TABLE digested AS SELECT * FROM main.digested WHERE 0")  # pretend nothing was summarised
     else:
+        claude_error = classify.health_check()   # one tiny call: is Claude reachable at all?
+        if claude_error:
+            print(f"Claude health check FAILED: {claude_error}")
+            if live:
+                health.claude_down(claude_error, datetime.now())
+        elif live:
+            health.claude_ok()
         fetch_new(db, LOOKBACK_HOURS, show=False)
         learn.step(db, live=live)   # corrections -> rules BEFORE labelling and moving; never raises
         classify_pending(db)
@@ -424,10 +484,12 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
             screener.run(db, live=live)
         except Exception as e:  # a screening problem must never stop the summary
             print(f"Screener FAILED (summary unaffected): {e}")
+            step_notes.append("Job alerts couldn't be screened this time (Claude failed); retrying next run.")
         try:
             drafts.make_drafts(db, live=live)
         except Exception as e:  # a drafting problem must never stop the summary
             print(f"Drafts FAILED (summary unaffected): {e}")
+            step_notes.append("Reply drafts couldn't be written this time; retrying next run.")
         try:
             cleanup.run(db, live=live)
         except Exception as e:  # nor a moving problem
@@ -438,7 +500,7 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
     jobs = screener.unshown_high(db)
     if too_old and not sample:
         print(f"{len(too_old)} older emails skipped (over {MAX_AGE_HOURS}h old)")
-    if not recent and not jobs and not has_cal(cal):
+    if not recent and not jobs and not has_cal(cal) and not step_notes:
         print("No new emails: no summary this time.")
         if live and not sample:
             mark_done(db, too_old)
@@ -446,7 +508,7 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
         return (None if sample else db), live
 
     subject = subject_line(sections(recent), len(recent), jobs, cal)
-    notes = learn.unshown_lines(db) + unsub_folder.unshown_lines(db)
+    notes = step_notes + learn.unshown_lines(db) + unsub_folder.unshown_lines(db)
     text, html_body = build_text(recent, jobs, notes, cal), build_html(recent, jobs, notes, cal)
     print(f"\nSubject: {subject}\n\n{text}\n")
 
@@ -455,7 +517,7 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
     if live:
         deliver(subject, text, html_body)
         if not sample:
-            mark_done(db, recent + too_old)  # only after delivery worked
+            mark_done(db, [r for r in recent if r["label"] is not None] + too_old)  # only after delivery worked
             screener.mark_shown(db, jobs)
             learn.mark_shown(db)
             unsub_folder.mark_shown(db)

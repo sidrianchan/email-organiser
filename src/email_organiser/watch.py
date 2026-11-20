@@ -25,7 +25,7 @@ import argparse
 import sys
 from datetime import datetime, timedelta, timezone
 
-from . import digest, drafts, notify, slots, store, unsub_folder
+from . import classify, digest, drafts, health, notify, slots, store, unsub_folder
 from .classify import classify_pending
 from .fetch import fetch_new
 from .runlock import run_lock
@@ -88,7 +88,11 @@ def check(db, live: bool, now: datetime | None = None) -> int:
     """One quick check. Returns how many emails were pinged about."""
     unsubscribe_step(db, live, now or datetime.now())
     fetch_new(db, LOOKBACK_HOURS, show=False)
-    classify_pending(db, since_hours=LOOKBACK_HOURS)
+    labelled = classify_pending(db, since_hours=LOOKBACK_HOURS)
+    if classify.last_error and live:   # Claude failing: say so now, not at the next summary
+        health.claude_down(classify.last_error, now or datetime.now())
+    elif labelled and not classify.last_error:
+        health.claude_ok()
     rows = to_alert(db)
     if not rows:
         print("nothing urgent")

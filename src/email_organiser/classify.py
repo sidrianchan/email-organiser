@@ -15,6 +15,9 @@ from . import store
 from .labels import JOB_ALERT_RULE, NAMES, REPLY_RULE, describe
 
 BATCH_SIZE = 20  # emails per Claude call: fewer calls = less of your Pro usage
+# Which Claude every call uses. Pinned (20 Nov): unpinned, it followed the account default and
+# switched from Sonnet to Opus on 19 Nov without anyone deciding to. Set after measuring both.
+MODEL = "claude-opus-5-5"
 
 SYSTEM_PROMPT = f"""You sort emails for one person: a recent graduate job hunting in Hong Kong and London.
 
@@ -55,11 +58,14 @@ SCHEMA = {
 }
 
 
-def run_claude(prompt: str, system_prompt: str, schema: dict) -> tuple[dict, str]:
+def run_claude(prompt: str, system_prompt: str, schema: dict,
+               model: str | None = None) -> tuple[dict, str]:
     """One locked-down Claude call. Returns (answer shaped like `schema`, model name).
-    Shared by classify (labels) and drafts (reply text)."""
+    Shared by classify (labels), drafts (reply text), screener and agenda.
+    model: None = MODEL below. Pinned so results don't change when the account default does."""
     command = [
         "claude", "-p", prompt,
+        "--model", model or MODEL,
         "--system-prompt", system_prompt,
         "--json-schema", json.dumps(schema),
         "--output-format", "json",
@@ -71,14 +77,39 @@ def run_claude(prompt: str, system_prompt: str, schema: dict) -> tuple[dict, str
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
-        raise RuntimeError(f"claude failed: {result.stderr.strip() or result.stdout[:300]}")
+        raise RuntimeError(f"claude failed: {why_failed(result.stdout, result.stderr)}")
 
     reply = json.loads(result.stdout)
     if reply.get("is_error") or not reply.get("structured_output"):
-        raise RuntimeError(f"no usable answer: {str(reply.get('result'))[:300]}")
+        raise RuntimeError(f"no usable answer: {why_failed(result.stdout, '')}")
 
     model = next(iter(reply.get("modelUsage", {})), "unknown")
     return reply["structured_output"], model
+
+
+def why_failed(stdout: str, stderr: str) -> str:
+    """The readable reason from claude's output. On 20 Nov the log kept only the first
+    300 characters of the JSON, which ended before the reason; this pulls the reason out."""
+    try:
+        reply = json.loads(stdout)
+        bits = [str(reply.get("result") or "").strip(),
+                f"API status {reply['api_error_status']}" if reply.get("api_error_status") else "",
+                stderr.strip()]
+        reason = "; ".join(b for b in bits if b)
+    except (json.JSONDecodeError, AttributeError):
+        reason = stderr.strip() or stdout.strip()
+    return (reason or "no reason given")[:500]
+
+
+def health_check() -> str | None:
+    """One tiny call (a few tokens). None if Claude answers, else why not.
+    The summary runs this first, so a logged-out Claude is reported, not silently skipped."""
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    try:
+        run_claude("Reply with ok = true.", "Answer in the requested shape.", schema)
+        return None
+    except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+        return str(e)
 
 
 def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
@@ -89,10 +120,15 @@ def ask_claude(emails: list[dict]) -> tuple[dict[int, dict], str]:
     return {item["id"]: item for item in answer["labels"]}, model
 
 
+last_error: str | None = None   # the last batch failure in classify_pending (None = all fine)
+
+
 def classify_pending(db, since_hours: int | None = None) -> int:
     """Label every email Claude hasn't labelled yet. Returns how many were labelled.
     since_hours: only mail first seen that recently (the 15-minute check uses this, so an
     email that keeps failing isn't retried 96 times a day; the summary run retries the rest)."""
+    global last_error
+    last_error = None
     rows = db.execute("""
         SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.snippet
         FROM messages m
@@ -128,6 +164,7 @@ def classify_pending(db, since_hours: int | None = None) -> int:
             answers, model = ask_claude(emails)
         except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
             print(f"  batch {start // BATCH_SIZE + 1} failed, will retry next run: {e}")
+            last_error = str(e)
             continue
 
         for i, r in enumerate(batch):

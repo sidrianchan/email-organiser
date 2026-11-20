@@ -17,3 +17,12 @@ def no_real_unsubscribe_folders(monkeypatch):
     the start of every quick check). A test that wants accounts patches them itself."""
     from email_organiser import unsub_folder
     monkeypatch.setattr(unsub_folder, "load_accounts", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def no_real_claude_health_check(monkeypatch, tmp_path):
+    """The summary's Claude health check is a real `claude -p` call: tests never make it.
+    Claude-down ping state goes to a temp file, never ~/.email-organiser."""
+    from email_organiser import classify, health
+    monkeypatch.setattr(classify, "health_check", lambda: None)
+    monkeypatch.setattr(health, "STATE", tmp_path / "claude_down_pinged")
