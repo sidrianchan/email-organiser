@@ -191,6 +191,7 @@ def open_db() -> sqlite3.Connection:
     _add_column_if_missing(db, "jobs", "commission", "INTEGER")
     _add_column_if_missing(db, "jobs", "level", "TEXT")   # screener rubric (20 Nov): graduate/junior/...
     _add_column_if_missing(db, "jobs", "gap", "TEXT")     # the requirement he may not meet, or ""
+    _add_column_if_missing(db, "jobs", "employer_size", "TEXT")   # large/small/unknown: orders the high list
     _add_column_if_missing(db, "drafts", "body", "TEXT")   # milestone 7: compare with what you sent
     return db
 
