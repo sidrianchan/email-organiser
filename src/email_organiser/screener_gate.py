@@ -174,7 +174,7 @@ def main() -> None:
     if args.run:
         base = json.loads(BASELINE.read_text())
         prompt, schema = (base["prompt"], base["schema"]) if args.baseline else (screener.SYSTEM_PROMPT, screener.SCHEMA)
-        model = args.model or (base["model"] if args.baseline else classify.MODEL)
+        model = args.model or (base["model"] if args.baseline else classify.SCREEN_MODEL)
         print(f"{args.run}: {len(key)} marked jobs from {len({k['message_id'] for k in key})} alerts, {model}")
         runs = []
         for n in range(args.runs):

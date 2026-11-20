@@ -31,7 +31,7 @@ from email.utils import parseaddr
 from urllib.parse import urlparse
 
 from . import paths, store
-from .classify import run_claude
+from .classify import SCREEN_MODEL, run_claude
 from .cleanup import is_job_board
 from .mail import connect, load_accounts
 from .store import arrived
@@ -304,7 +304,7 @@ def screen(alerts: list[dict], profile: str, prompt: str | None = None, schema: 
         payload = json.dumps(emails, ensure_ascii=False, indent=1)
         answer, used = run_claude(f"Screen these job-alert emails:\n{payload}",
                                   (prompt or SYSTEM_PROMPT).format(profile=profile), schema or SCHEMA,
-                                  model=model)
+                                  model=model or SCREEN_MODEL)
         for item in answer["emails"]:
             if not 0 <= item["id"] < len(batch):
                 continue

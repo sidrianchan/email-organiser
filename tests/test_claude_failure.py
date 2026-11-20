@@ -156,7 +156,7 @@ def test_summary_run_replays_20_nov(db, monkeypatch, capsys, tmp_path):
 
 
 def test_each_step_uses_its_model(monkeypatch):
-    """Labelling and calendar on Sonnet (measured 20 Nov); screener and drafts on Opus (not measured)."""
+    """Labelling, calendar and screener on Sonnet (measured 20 Nov); drafts on Opus (not measured)."""
     used = []
     def run(command, **kwargs):
         used.append(command[command.index("--model") + 1])
@@ -173,4 +173,4 @@ def test_each_step_uses_its_model(monkeypatch):
     seen = []
     monkeypatch.setattr(screener, "run_claude", lambda p, s, sc, model=None: (seen.append(model), ({"emails": []}, "m"))[1])
     screener.screen([{"row": {"sender": "a@b.example", "subject": "s"}, "text": "x", "links": {}}], "profile")
-    assert seen == [None]   # the live screener passes no model: run_claude's default, Opus
+    assert seen == [classify.SCREEN_MODEL] and "sonnet" in classify.SCREEN_MODEL   # measured 20 Nov

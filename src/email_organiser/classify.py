@@ -20,8 +20,12 @@ BATCH_SIZE = 20  # emails per Claude call: fewer calls = less of your Pro usage
 # Measured 20 Nov on the 87 hand labels, 3 runs each: job emails 19/19 for both models; Sonnet got
 # 2 routine emails wrong that Opus got right. Labelling runs every 15 min, so it uses most of the
 # Pro allowance: Sonnet. The screener and drafts aren't measured (no answer key), so they stay Opus.
-MODEL = "claude-opus-5-5"          # default: job screener, reply drafts
-LABEL_MODEL = "claude-sonnet-5-5"  # labelling, calendar judging, health check
+# Screener measured 20 Nov on Sid's 70 marked jobs (screener_gate.py), 2 runs each: Sonnet 57 and
+# 56/70 right, Opus 57 and 57; no job consistently different. Screening reads the longest emails,
+# so it moves to Sonnet too.
+MODEL = "claude-opus-5-5"           # default: reply drafts
+LABEL_MODEL = "claude-sonnet-5-5"   # labelling, calendar judging, health check
+SCREEN_MODEL = "claude-sonnet-5-5"  # job screener
 
 SYSTEM_PROMPT = f"""You sort emails for one person: a recent graduate job hunting in Hong Kong and London.
 
