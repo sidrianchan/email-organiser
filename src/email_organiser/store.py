@@ -157,6 +157,18 @@ CREATE TABLE IF NOT EXISTS summary_runs (   -- slots.py: was each 08:00/18:00 su
     network INTEGER DEFAULT 0,         -- 1 = failed for lack of network (doesn't count towards giving up)
     via TEXT                           -- digest (scheduled or by hand) / catch-up
 );
+CREATE TABLE IF NOT EXISTS job_messages (   -- feedback.py: a job sent to Telegram with buttons
+    id INTEGER PRIMARY KEY,               -- what the buttons carry (Telegram allows 64 bytes)
+    job_key TEXT UNIQUE NOT NULL,
+    message_id INTEGER,                   -- Telegram's id, to update the buttons after a tap
+    sent_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS job_feedback (   -- your verdict on a screened job; the latest tap wins
+    job_key TEXT PRIMARY KEY,
+    verdict TEXT NOT NULL,                -- apply / applied / not_qualified / not_interested
+    fit_then TEXT,                        -- what the screener had said, kept for scoring
+    at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS my_labels (
     account TEXT, uidvalidity INTEGER, uid INTEGER,
     label TEXT NOT NULL,

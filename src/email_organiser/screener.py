@@ -54,6 +54,7 @@ fit = how realistic it is that he gets an interview:
 - low: senior or manager roles, 3+ years' experience, internships that require current
   student enrolment (he has graduated), or a clear mismatch.
 He is open on role and industry: do not rate a job lower just because it is not data science.
+If the profile states a rating preference, follow it: it overrides the rules above.
 commission = true if it is likely a commission-based sales or agent role: insurers and
   financial-planning firms (e.g. AIA, Prudential, Manulife, FWD, AXA) advertising management
   trainee, business consultant, wealth strategist/planner or financial planner roles, or any

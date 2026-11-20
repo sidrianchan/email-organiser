@@ -26,3 +26,15 @@ def no_real_claude_health_check(monkeypatch, tmp_path):
     from email_organiser import classify, health
     monkeypatch.setattr(classify, "health_check", lambda: None)
     monkeypatch.setattr(health, "STATE", tmp_path / "claude_down_pinged")
+
+
+@pytest.fixture(autouse=True)
+def no_real_telegram_job_buttons(monkeypatch, tmp_path):
+    """Job buttons (feedback.py) never reach the real Telegram or the real applied.tsv in tests."""
+    from email_organiser import feedback, paths
+    def no_chat():
+        raise RuntimeError("Telegram not set up (test)")
+    monkeypatch.setattr(feedback, "chat", no_chat)
+    monkeypatch.setattr(feedback, "OFFSET", tmp_path / "telegram_offset")
+    monkeypatch.setattr(feedback, "SEND_GAP", 0)
+    monkeypatch.setattr(paths, "APPLIED", tmp_path / "applied.tsv")

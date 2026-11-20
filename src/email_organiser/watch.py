@@ -25,7 +25,7 @@ import argparse
 import sys
 from datetime import datetime, timedelta, timezone
 
-from . import classify, digest, drafts, health, notify, slots, store, unsub_folder
+from . import classify, digest, drafts, feedback, health, notify, slots, store, unsub_folder
 from .classify import classify_pending
 from .fetch import fetch_new
 from .runlock import run_lock
@@ -130,6 +130,7 @@ def main() -> None:
             print("summary is running: skipping this check")
             return
         db = store.open_db()
+        feedback.step(db, live)   # your taps on job buttons; never raises
         if live:
             catch_up(db, datetime.now())
         check(db, live)

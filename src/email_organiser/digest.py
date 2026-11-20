@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from . import agenda, classify, cleanup, drafts, health, learn, notify, paths, screener, slots, store, unsub_folder
+from . import agenda, classify, cleanup, drafts, feedback, health, learn, notify, paths, screener, slots, store, unsub_folder
 from .runlock import run_lock
 from .classify import classify_pending
 from .fetch import OWN_HEADER, fetch_new
@@ -523,6 +523,11 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
             unsub_folder.mark_shown(db)
         print(f"Delivered to your {DELIVER_TO} inbox.")
         notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO)  # after delivery; can't undo it
+        if jobs and not sample:
+            try:   # each good job with feedback buttons (feedback.py); never stops the summary
+                print(f"Telegram: {feedback.send_jobs(db, jobs)} job(s) sent with buttons")
+            except Exception as e:
+                print(f"Job buttons FAILED (summary unaffected; retried with the next summary's jobs only): {e}")
     else:
         print(f"(dry run: nothing delivered. HTML preview: {preview})")
         text, loud = notify.message(ping_counts(recent, jobs), len(recent), DELIVER_TO)
