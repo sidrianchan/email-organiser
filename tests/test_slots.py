@@ -30,7 +30,7 @@ def db(tmp_path, monkeypatch):
 def runs(monkeypatch):
     """Fake summary: no mail server, no Claude. Set `runs.error` to make it fail."""
     calls = []
-    def fake_summarise(live, sample, slot=None):
+    def fake_summarise(live, sample, slot=None, db=None):
         calls.append(slot)
         if fake_summarise.error:
             raise fake_summarise.error
@@ -132,3 +132,46 @@ def test_dry_run_check_never_catches_up(db, runs, monkeypatch, tmp_path):
     monkeypatch.setattr("sys.argv", ["watch"])               # no --live
     watch.main()
     assert runs.calls == []
+
+
+# --- 22 Nov: the 21 Nov 18:01 failure, which crashed again while recording itself ---
+
+def test_a_dropped_mail_connection_is_no_network():
+    import errno, imaplib
+    assert slots.is_network(imaplib.IMAP4.abort("command: FETCH => socket error: EOF"))
+    assert slots.is_network(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"))
+    assert slots.is_network(OSError(errno.EHOSTUNREACH, "No route to host"))
+    assert not slots.is_network(OSError(errno.EACCES, "Permission denied"))
+    assert not slots.is_network(RuntimeError("claude failed"))
+
+
+def test_a_run_that_dies_half_written_is_rolled_back_and_recorded(db, monkeypatch):
+    """The real failure: Yahoo's new mail written (not yet saved), then iCloud's connection
+    drops. The failure must be recorded (as no network) and the half-written mail undone."""
+    import imaplib
+    def half_then_drop(db, hours, show=True):
+        db.execute("INSERT INTO messages (account, uidvalidity, uid, message_id, sender, subject, date, snippet) "
+                   "VALUES ('yahoo', 1, 1, '<m@x>', 'a@b.c', 's', 'd', 'x')")   # written, not committed
+        raise imaplib.IMAP4.abort("command: FETCH => socket error: EOF")
+    monkeypatch.setattr(digest.classify, "health_check", lambda: None)
+    monkeypatch.setattr(digest.health, "claude_ok", lambda: None)
+    monkeypatch.setattr(digest, "fetch_new", half_then_drop)
+    slots.record(db, at(8), at(8, 1), "digest")   # the morning's run went fine (not a fresh install)
+    with pytest.raises(imaplib.IMAP4.abort):
+        digest.summarise_recorded("digest", now=at(18, 1))
+    check = store.open_db()   # a second connection, as the 15-minute check would read it
+    rows = check.execute("SELECT ok, network, error FROM summary_runs").fetchall()
+    assert [(r["ok"], r["network"]) for r in rows] == [(1, 0), (0, 1)] and "abort" in rows[1]["error"]
+    assert check.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0   # half-written mail undone
+    assert slots.failures(check, at(18)) == 0                                    # network: never gives up
+
+
+def test_a_failed_record_never_hides_the_real_error(db, runs, monkeypatch, capsys):
+    runs.error = RuntimeError("real problem")
+    slots.record(db, at(8), at(8, 1), "digest")
+    def locked(*a, **k):
+        raise store.sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(digest.slots, "record", locked)
+    with pytest.raises(RuntimeError, match="real problem"):
+        digest.summarise_recorded("digest", now=at(18, 1))
+    assert "Couldn't record the failed run" in capsys.readouterr().out

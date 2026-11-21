@@ -110,10 +110,10 @@ def test_calendar_leads_the_summary_and_is_escaped():
     jobs = [dict(title="Analyst", company="Acme", location="HK", closing="", reason="fits", url="")]
     h = digest.build_html([], jobs, cal=cal)
     assert "<script>x()" not in h and "&lt;script&gt;" in h
-    assert h.index("Today, Wed 18 Nov") < h.index("Jobs worth applying to")
+    assert h.index("Today, Wed 18 Nov") < h.index("May need experience")
     t = digest.build_text([], jobs, cal=cal)
     assert "TODAY, WED 18 NOV (2)\n" in t and "* 3 – 4:30 PM  Driving lesson" in t
-    assert t.index("TODAY") < t.index("JOBS WORTH")
+    assert t.index("TODAY") < t.index("JOBS: MAY NEED EXPERIENCE")
     assert digest.subject_line(digest.sections([]), 0, jobs, cal).endswith(": 2 events today, 1 good job")
 
 

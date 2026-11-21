@@ -79,17 +79,33 @@ def same_job(job: dict, marked: dict) -> bool:
     return first(job["company"]) == first(marked["company"]) and screener.same_title(job["title"], marked["title"])
 
 
-def run_once(key: list[dict], alerts: dict, prompt: str, schema: dict, model: str | None) -> list[str | None]:
-    """The fit given to each marked job in one run (None = not found in the alert)."""
+def run_once(key: list[dict], alerts: dict, prompt: str, schema: dict,
+             model: str | None) -> tuple[list[str | None], list[str | None]]:
+    """(fits, levels) given to each marked job in one run (None = not found in the alert)."""
     ids = sorted({k["message_id"] for k in key if k["message_id"] in alerts})
     batch = [{"row": {"sender": alerts[i]["sender"], "subject": alerts[i]["subject"], "message_id": i},
               "text": alerts[i]["text"][:screener.MAX_CHARS], "links": alerts[i]["links"]} for i in ids]
     jobs = screener.screen(batch, paths.PROFILE.read_text(), prompt=prompt, schema=schema, model=model)
-    out = []
+    fits, levels = [], []
     for k in key:
         found = [j for j in jobs if j["row"]["message_id"] == k["message_id"] and same_job(j, k)]
-        out.append(found[0]["fit"] if found else None)
-    return out
+        fits.append(found[0]["fit"] if found else None)
+        levels.append(found[0].get("level") if found else None)
+    return fits, levels
+
+
+def groups(key: list[dict], fits: list, levels: list) -> str:
+    """How the two groups of shown jobs (22 Nov) match your taps: 'no experience needed' (high and
+    level graduate) vs 'may need experience' (every other high job)."""
+    out = []
+    for name, want in (("no experience needed", True), ("may need experience", False)):
+        got = [k for k, f, lv in zip(key, fits, levels)
+               if f == "high" and screener.needs_no_experience({"level": lv}) == want]
+        n = {v: sum(k["verdict"] == v for k in got) for v in ("apply", "applied", "not_qualified", "not_interested")}
+        nq = f"{n['not_qualified'] / len(got):.0%}" if got else "n/a"
+        out.append(f"{name}: {len(got)} (yes {n['apply'] + n['applied']}, not qualified {n['not_qualified']} = {nq}, "
+                   f"not interested {n['not_interested']})")
+    return "; ".join(out)
 
 
 def score(key: list[dict], fits: list) -> dict:
@@ -128,17 +144,23 @@ def verdict(key: list[dict], old: list[list], new: list[list]) -> tuple[bool, li
 RUNS = paths.HOME / "screener_runs"
 
 
-def save_runs(name: str, key: list[dict], runs: list[list], model: str, baseline: bool) -> None:
+def save_runs(name: str, key: list[dict], runs: list[list], model: str, baseline: bool,
+              levels: list[list] | None = None) -> None:
     RUNS.mkdir(exist_ok=True)
     (RUNS / f"{name}.json").write_text(json.dumps({"jobs": [k["job_key"] for k in key], "fits": runs,
-                                                   "model": model, "baseline": baseline}))
+                                                   "levels": levels, "model": model, "baseline": baseline}))
 
 
 def load_runs(name: str, key: list[dict]) -> list[list]:
+    return load_all(name, key)[0]
+
+
+def load_all(name: str, key: list[dict]) -> tuple[list[list], list[list] | None]:
+    """(fits per run, levels per run or None for runs saved before 22 Nov)."""
     data = json.loads((RUNS / f"{name}.json").read_text())
     if data["jobs"] != [k["job_key"] for k in key]:
         raise SystemExit(f"{name}: the answer key changed since this run; run it again")
-    return data["fits"]
+    return data["fits"], data.get("levels")
 
 
 def main() -> None:
@@ -163,10 +185,12 @@ def main() -> None:
     key, alerts = answer_key(db), json.loads(TESTSET.read_text())
     key = [k for k in key if k["message_id"] in alerts]
     if args.compare:
-        old, new = (load_runs(n, key) for n in args.compare)
-        for name, runs in zip(args.compare, (old, new)):
+        (old, old_lv), (new, new_lv) = (load_all(n, key) for n in args.compare)
+        for name, runs, lvs in zip(args.compare, (old, new), (old_lv, new_lv)):
             for n, fits in enumerate(runs):
                 print(f"{name} run {n + 1}: {line(score(key, fits))}")
+                if lvs:
+                    print(f"  groups: {groups(key, fits, lvs[n])}")
         ok, notes = verdict(key, old, new)
         print(f"\n{'KEEP' if ok else 'REJECT'}: " + "\n  ".join(notes))
         return
@@ -175,11 +199,14 @@ def main() -> None:
         prompt, schema = (base["prompt"], base["schema"]) if args.baseline else (screener.SYSTEM_PROMPT, screener.SCHEMA)
         model = args.model or (base["model"] if args.baseline else classify.SCREEN_MODEL)
         print(f"{args.run}: {len(key)} marked jobs from {len({k['message_id'] for k in key})} alerts, {model}")
-        runs = []
+        runs, levels = [], []
         for n in range(args.runs):
-            runs.append(run_once(key, alerts, prompt, schema, model))
-            print(f"  run {n + 1}: {line(score(key, runs[-1]))}", flush=True)
-        save_runs(args.run, key, runs, model, args.baseline)
+            fits, lvs = run_once(key, alerts, prompt, schema, model)
+            runs.append(fits)
+            levels.append(lvs)
+            print(f"  run {n + 1}: {line(score(key, fits))}", flush=True)
+            print(f"    groups: {groups(key, fits, lvs)}", flush=True)
+        save_runs(args.run, key, runs, model, args.baseline, levels)
         return
     parser.print_help()
 

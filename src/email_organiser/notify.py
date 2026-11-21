@@ -65,6 +65,17 @@ def plain(text: str) -> str:
     return html.unescape(re.sub(r"</?b>", "", text))
 
 
+def good_jobs_bit(n: int, no_exp: int = 0) -> str:
+    """'16 good jobs (2 no experience needed)'. no_exp = how many of them say a fresh graduate
+    qualifies (screener.needs_no_experience, 22 Nov)."""
+    if not n:
+        return ""
+    words = f"{n} good job{'s' if n > 1 else ''}"
+    if no_exp and no_exp == n:
+        return f"{words} (no experience needed)"
+    return f"{words} ({no_exp} no experience needed)" if no_exp else words
+
+
 def mail_line(counts: dict, total: int, account: str) -> tuple[str, bool]:
     """The counts-only mail line, e.g. '08:00 mail: 1 job, 3 to read. Check Yahoo.'"""
     stamp = datetime.now().strftime("%H:%M")
@@ -73,7 +84,7 @@ def mail_line(counts: dict, total: int, account: str) -> tuple[str, bool]:
     good = counts.get("jobs", 0)
     failed = counts.get("unlabelled", 0)
     bits = [f"⚠️ {failed} not labelled (Claude failed: run /login)" if failed else "",
-            f"{good} good job{'s' if good > 1 else ''}" if good else "",
+            good_jobs_bit(good, counts.get("grad_jobs", 0)),
             f"{counts['job']} job" if counts["job"] else "",
             f"{counts.get('updates', 0)} job update{'s' if counts.get('updates', 0) > 1 else ''}"
             if counts.get("updates") else "",   # status news (milestone 9): listed, never a sound

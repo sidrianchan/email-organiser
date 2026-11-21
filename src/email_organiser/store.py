@@ -161,6 +161,11 @@ CREATE TABLE IF NOT EXISTS todo_messages (   -- a summary ping with Done buttons
     message_id INTEGER PRIMARY KEY, app_ids TEXT,
     sent_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS job_group_messages (   -- feedback.py: several 'may need experience' jobs
+    message_id INTEGER PRIMARY KEY,                -- in one Telegram message (22 Nov)
+    msg_ids TEXT,                                  -- their job_messages ids, in the order listed
+    sent_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS application_events (   -- every change, with the email behind it (undo)
     id INTEGER PRIMARY KEY,
     application_id INTEGER NOT NULL,
@@ -227,9 +232,14 @@ CREATE TABLE IF NOT EXISTS my_labels (
 """
 
 
+BUSY_TIMEOUT = 30   # seconds
+
+
 def open_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(DB_PATH)
+    # timeout: wait up to 30 s for another run's write to finish (default 5 s). The tap collector
+    # runs every minute alongside the summary, whose writes can be slow (22 Nov).
+    db = sqlite3.connect(DB_PATH, timeout=BUSY_TIMEOUT)
     db.row_factory = sqlite3.Row  # lets us read columns by name: row["subject"]
     db.execute(SCHEMA)
     db.executescript(LABEL_SCHEMA)

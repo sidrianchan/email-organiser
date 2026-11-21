@@ -8,6 +8,8 @@ so the summary silently never comes. Now every summary run is recorded here, and
 A "slot" is the scheduled time a summary belongs to: the latest 08:00 or 18:00 at or before
 now. A slot is done once a summary that STARTED at or after it succeeded.
 """
+import errno
+import imaplib
 import socket
 import ssl
 from datetime import datetime, timedelta
@@ -15,7 +17,12 @@ from datetime import datetime, timedelta
 SLOT_HOURS = (8, 18)
 GRACE = timedelta(minutes=10)   # the scheduled run gets the first 10 minutes to itself
 MAX_FAILS = 3                   # real errors per slot before catch-up gives up (network errors don't count)
-NETWORK_ERRORS = (socket.gaierror, TimeoutError, ConnectionError, ssl.SSLError)
+# imaplib.IMAP4.abort = the mail server's connection dropped mid-command ("socket error: EOF"),
+# what a Mac going back to sleep mid-run looks like (21 Nov 18:01). Added 22 Nov.
+NETWORK_ERRORS = (socket.gaierror, TimeoutError, ConnectionError, ssl.SSLError, imaplib.IMAP4.abort)
+# OSErrors that only mean "no usable network right now" (seen in watch.log while asleep or
+# changing networks): can't assign address, network down/unreachable, host unreachable.
+NETWORK_ERRNOS = {errno.EADDRNOTAVAIL, errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH}
 
 
 def current_slot(now: datetime) -> datetime:
@@ -29,7 +36,7 @@ def current_slot(now: datetime) -> datetime:
 
 def is_network(error: BaseException) -> bool:
     """No network (asleep, Wi-Fi down) rather than something actually broken."""
-    return isinstance(error, NETWORK_ERRORS)
+    return isinstance(error, NETWORK_ERRORS) or (isinstance(error, OSError) and error.errno in NETWORK_ERRNOS)
 
 
 def record(db, slot: datetime, started: datetime, via: str, error: BaseException | None = None) -> None:

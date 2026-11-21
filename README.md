@@ -57,7 +57,7 @@ Every disagreement is on the blurry line between "worth reading", "fyi", "newsle
 | `fetch.py` | Downloads the last day of mail without marking it read; remembers what it has seen |
 | `classify.py` | Sends emails to Claude in batches of 20; gets back a type, a needs-reply flag and a reason |
 | `drafts.py` | Writes reply drafts for emails that need one and places them in each account's Drafts folder |
-| `screener.py` | Reads job-alert emails, has Claude list and rate every job against my profile, keeps the high-fit ones (links checked, duplicates and jobs I've applied to removed) |
+| `screener.py` | Reads job-alert emails, has Claude list and rate every job against my profile, keeps the high-fit ones (links checked, duplicates and jobs I've applied to removed), roles open to fresh graduates first |
 | `cleanup.py` | Moves recent spam, promos and newsletters to `Assistant-Review` (never job mail, anything needing a reply, or job-board alerts) |
 | `digest.py` | Builds the summary (HTML + plain text) and places it in the inbox |
 | `agenda.py` | Reads macOS Calendar (read-only) for the 08:00 summary: today's events, plus anything in the next 7 days that needs preparing. Claude judges each event once (true/false + a prep note), so most mornings make no Claude call |
@@ -175,6 +175,7 @@ Tests run offline, with no mail server or Claude needed: `uv run pytest`.
 | 8.5 | Catch-up: a summary missed while the Mac slept is run at the next quick check | ✓ |
 | 8.6 | Morning brief: Apple Reminders due + Hong Kong weather warnings, in the summary and the 08:00 Telegram message; dark-mode summary; no drafts to no-reply senders; daily database backup | ✓ |
 | 9 | Job pipeline: applications tracked from my email, pings only for actions, job to-dos (assessments etc.) in both summaries with a Done button, an apply queue. Gate: 38 job emails I labelled, 3 runs, 15/15 actions caught, 0 news called action | ✓ |
+| 9.1 | Graduate roles first: good jobs split into "No experience needed" (the ad says fresh graduates qualify) and "May need experience", the second group sent to Telegram as one numbered list instead of a message per job; "Would apply" taps now reach the apply queue. Gate on 116 jobs I'd marked: 4/47 not-qualified in the first group vs 28/60 in the second, nothing I'd apply to lost | ✓ |
 
 ## How this was built
 

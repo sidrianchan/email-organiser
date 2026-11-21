@@ -47,8 +47,12 @@ For each job give: title, company, location, closing date (or ""), the link tag 
 belongs to that job (like "L3", or "" if none), then judge it in this order:
 
 1. level: what the job asks for, from the title, any salary shown and any badge:
-   - "graduate": graduate scheme, trainee, management trainee, or says fresh graduates welcome
-   - "junior": junior, assistant, associate or analyst-level, 0-2 years, or pay at about
+   - "graduate": the alert says a fresh graduate qualifies: a graduate scheme or programme,
+     graduate, trainee or management trainee in the title, "entry-level" or "entry level",
+     "fresh graduates welcome", "no experience required", "IANG welcome", a range of years
+     starting at 0 (e.g. "0-2 years"), or the same in Chinese (e.g. 應屆畢業生, 畢業生,
+     無經驗, 無需經驗, 無相關經驗要求). "Junior" or "assistant" alone is not enough: that is junior.
+   - "junior": junior, assistant, associate or analyst-level, 1-2 years, or pay at about
      HK$25,000 a month / GBP 35,000 a year or less
    - "experienced": senior, manager, lead, principal, 3+ years, or pay clearly above junior
    - "unclear": nothing in the alert says (a plain title such as "Software Engineer")
@@ -330,8 +334,10 @@ def run(db, live: bool, sample: bool = False) -> int:
         print(f"  {len(skipped)} jobs skipped: already applied ({', '.join(j['title'][:30] for j in skipped)})")
     if not live:
         order = {f: i for i, f in enumerate(FITS)}
-        for j in sorted(jobs, key=lambda j: (order[j["fit"]], size_rank(j.get("employer_size")))):
-            print(f"  {j['fit']:<6} {(j.get('employer_size') or '?')[:5]:<5} {j['title'][:55]:<55} | {j['company'][:28]:<28} | "
+        for j in sorted(jobs, key=lambda j: (order[j["fit"]], not needs_no_experience(j),
+                                             size_rank(j.get("employer_size")))):
+            group = "no-exp" if needs_no_experience(j) else ""
+            print(f"  {j['fit']:<6} {group:<6} {(j.get('employer_size') or '?')[:5]:<5} {j['title'][:55]:<55} | {j['company'][:28]:<28} | "
                   f"{j['location'][:22]:<22} | {j['reason']}{'' if j['url'] else '  (no link)'}"
                   f"{'  [likely commission-based]' if j.get('commission') else ''}")
         counts = {f: sum(j["fit"] == f for j in jobs) for f in FITS}
@@ -349,11 +355,25 @@ def size_rank(size: str | None) -> int:
     return SIZE_ORDER.get(size, 1)   # not judged (older jobs) = unknown
 
 
+def needs_no_experience(job) -> bool:
+    """The 'No experience needed' group (Sid, 22 Nov): only jobs whose alert says a fresh graduate
+    qualifies (level 'graduate'). Junior, plain-title and older unjudged jobs go in 'May need
+    experience': by his taps, most of those wanted experience the alert didn't mention."""
+    level = job["level"] if "level" in job.keys() else None
+    return level == "graduate"
+
+
+def split_by_experience(jobs: list) -> tuple[list, list]:
+    """(no experience needed, may need experience), each keeping its order."""
+    return [j for j in jobs if needs_no_experience(j)], [j for j in jobs if not needs_no_experience(j)]
+
+
 def unshown_high(db) -> list:
-    """High-fit jobs not yet in a summary: big employers first, then oldest first."""
+    """High-fit jobs not yet in a summary: no-experience-needed ones first, then big employers
+    first, then oldest first."""
     rows = db.execute("SELECT * FROM jobs WHERE fit = 'high' AND shown_at IS NULL "
                       "ORDER BY found_at").fetchall()
-    return sorted(rows, key=lambda r: size_rank(r["employer_size"]))   # stable: keeps found_at order
+    return sorted(rows, key=lambda r: (not needs_no_experience(r), size_rank(r["employer_size"])))   # stable
 
 
 def mark_shown(db, jobs: list) -> None:

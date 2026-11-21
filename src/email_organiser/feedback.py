@@ -24,7 +24,10 @@ reader, so two readers never race. Only taps from your own chat count.
     python3 -m uv run python -m email_organiser.feedback report           (what you've said so far)
 """
 import argparse
+import html
+import json
 import random
+import sqlite3
 import sys
 import time
 from datetime import date
@@ -42,6 +45,9 @@ VERDICTS = {  # callback code -> (stored verdict, button text)
 OFFSET = paths.HOME / "telegram_offset"   # the last Telegram update already read
 BACKLOG_MEDIUM = 15                       # medium jobs mixed into the backlog: did it miss good ones?
 SEND_GAP = 1.1                            # seconds between messages (Telegram: ~1 per second per chat)
+GROUP_SIZE = 8                            # 'may need experience' jobs per grouped message (22 Nov)
+GROUP_MAX_CHARS = 3500                    # Telegram's limit is 4,096; links make job lines long
+GROUP_CODES = [("a", "Apply"), ("q", "Not qualified"), ("i", "Not interested")]   # 'Applied': the apply queue
 
 
 def job_text(j, fit_note: str = "") -> str:
@@ -98,6 +104,110 @@ def send_jobs(db, jobs: list, fit_note=lambda j: "") -> int:
     return sent
 
 
+def group_line(n: int, j) -> str:
+    """'3. Data Analyst · Acme · Hong Kong · closes 30 Nov', the title linked if it has a link."""
+    e = html.escape
+    title = e(j["title"] or "(no title)")
+    if (j["url"] or "").startswith("https://"):
+        title = f'<a href="{e(j["url"])}">{title}</a>'
+    bits = [e(x) for x in (j["company"], j["location"]) if x]
+    if j["closing"]:
+        bits.append(f"closes {e(j['closing'])}")
+    if "commission" in j.keys() and j["commission"]:
+        bits.append("likely commission-based")
+    return f"{n}. " + " · ".join([title] + bits)
+
+
+def group_text(jobs: list, first: int = 1) -> str:
+    head = ("<b>🔎 May need experience</b>\nJunior roles and plain titles: the alert doesn't say whether "
+            "they take graduates.")
+    return head + "\n\n" + "\n".join(group_line(first + i, j) for i, j in enumerate(jobs))
+
+
+def group_keyboard(db, msg_ids: list[int], first: int = 1) -> dict:
+    """One row per job: 'n Apply' | 'n Not qualified' | 'n Not interested', the chosen one ticked.
+    A job marked Applied since (the apply queue) shows one inert '✓ Applied' button instead, so a
+    stray tap can't move it back to 'would apply'."""
+    rows = []
+    for n, msg_id in enumerate(msg_ids, first):
+        got = db.execute("SELECT f.verdict FROM job_messages m LEFT JOIN job_feedback f USING (job_key) "
+                         "WHERE m.id = ?", (msg_id,)).fetchone()
+        chosen = got["verdict"] if got else None
+        if chosen == "applied":
+            rows.append([{"text": f"{n} ✓ Applied", "callback_data": "jx"}])
+            continue
+        rows.append([{"text": ("✓ " if VERDICTS[code][0] == chosen else "") + f"{n} {text}",
+                      "callback_data": f"j:{code}:{msg_id}"} for code, text in GROUP_CODES])
+    return {"inline_keyboard": rows}
+
+
+def chunks(jobs: list) -> list[list]:
+    """At most GROUP_SIZE jobs per message, and short enough for Telegram."""
+    out, cur = [], []
+    for j in jobs:
+        if cur and (len(cur) == GROUP_SIZE or len(group_text(cur + [j])) > GROUP_MAX_CHARS):
+            out.append(cur)
+            cur = []
+        cur.append(j)
+    return out + ([cur] if cur else [])
+
+
+def send_group(db, jobs: list) -> int:
+    """The 'may need experience' jobs (22 Nov): a few messages listing several jobs each, instead
+    of one message per job. Silent, like send_jobs. Returns how many jobs went out. Raises on a
+    Telegram failure; jobs already sent stay recorded, so a retry only sends the rest."""
+    todo = [j for j in jobs
+            if not db.execute("SELECT 1 FROM job_messages WHERE job_key = ?", (j["job_key"],)).fetchone()]
+    if not todo:
+        return 0
+    token, chat_id = chat()
+    sent, first = 0, 1
+    for part in chunks(todo):
+        ids = [db.execute("INSERT INTO job_messages (job_key) VALUES (?)", (j["job_key"],)).lastrowid
+               for j in part]
+        try:
+            result = notify.call(token, "sendMessage", {
+                "chat_id": chat_id, "text": group_text(part, first), "parse_mode": "HTML",
+                "disable_notification": True, "link_preview_options": {"is_disabled": True},
+                "reply_markup": group_keyboard(db, ids, first)})
+        except Exception:
+            db.rollback()   # not sent: forget these rows, so the next run tries again
+            raise
+        db.executemany("UPDATE job_messages SET message_id = ? WHERE id = ?",
+                       [(result["message_id"], i) for i in ids])
+        db.execute("INSERT INTO job_group_messages (message_id, msg_ids) VALUES (?, ?)",
+                   (result["message_id"], json.dumps([first] + ids)))   # numbering start, then the ids
+        db.commit()
+        sent += len(part)
+        first += len(part)
+        time.sleep(SEND_GAP)
+    return sent
+
+
+def redraw(db, msg_id: int, verdict: str, message_id: int | None) -> dict:
+    """The buttons to show after a tap: the whole list for a grouped message, else the job's own four."""
+    row = db.execute("SELECT msg_ids FROM job_group_messages WHERE message_id = ?", (message_id,)).fetchone() \
+        if message_id else None
+    if row:
+        first, *ids = json.loads(row["msg_ids"])
+        return group_keyboard(db, ids, first)
+    return keyboard(msg_id, verdict)
+
+
+def sync_taps(db) -> list:
+    """One-off repair (22 Nov): 'Would apply' / 'Applied' taps that never reached the applications
+    table (taps between 21 Nov 02:28 and the fix). Only taps with no application at all; safe to
+    re-run. Returns the jobs it filed."""
+    rows = db.execute("""SELECT j.*, f.verdict FROM job_feedback f JOIN jobs j USING (job_key)
+                         WHERE f.verdict IN ('apply', 'applied')
+                         AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.job_key = f.job_key)
+                         ORDER BY f.at""").fetchall()
+    for r in rows:
+        to_pipeline(db, r, r["verdict"])
+    db.commit()
+    return rows
+
+
 def add_to_applied(j) -> None:
     """Same format as the rest of applied.tsv: company, title, status, date."""
     line = "\t".join([j["company"] or "", j["title"] or "", "Marked applied in Telegram",
@@ -119,10 +229,31 @@ def record(db, code: str, msg_id: int) -> str | None:
     before = db.execute("SELECT verdict FROM job_feedback WHERE job_key = ?", (row["job_key"],)).fetchone()
     db.execute("INSERT OR REPLACE INTO job_feedback (job_key, verdict, fit_then) VALUES (?, ?, ?)",
                (row["job_key"], verdict, row["fit"]))
+    to_pipeline(db, row, verdict)
     db.commit()
     if verdict == "applied" and (before is None or before["verdict"] != "applied"):
         add_to_applied(row)
     return verdict
+
+
+def to_pipeline(db, job, verdict: str) -> None:
+    """A tap also files the job in the applications table (fixed 22 Nov: from 21 Nov only the
+    one-off seed had done this, so new 'Would apply' taps never reached the apply queue).
+    Would apply -> 'would_apply' (the queue); Applied -> 'applied'. A 'no' tap on a job still only
+    at 'would_apply' takes it out of the queue ('withdrawn'); anything further along is kept."""
+    from . import pipeline
+    if verdict in ("apply", "applied"):
+        pipeline.upsert(db, job["company"] or "", job["title"] or "",
+                        "would_apply" if verdict == "apply" else "applied",
+                        source="telegram", job_key=job["job_key"])
+        return
+    app = db.execute("SELECT * FROM applications WHERE job_key = ? AND stage = 'would_apply'",
+                     (job["job_key"],)).fetchone()
+    if app is not None:
+        db.execute("UPDATE applications SET stage = 'withdrawn', updated_at = datetime('now') WHERE id = ?",
+                   (app["id"],))
+        pipeline.log(db, app["id"], None, "would_apply", "withdrawn", False, None,
+                     f"update, from telegram: you tapped {verdict.replace('_', ' ')}")
 
 
 def handle(db, update: dict, chat_id: int) -> tuple[str, dict] | None:
@@ -198,10 +329,14 @@ def collect(db) -> int:
                         try:
                             notify.call(token, "editMessageReplyMarkup", {
                                 "chat_id": chat_id, "message_id": m["message_id"],
-                                "reply_markup": keyboard(ans["msg_id"], ans["verdict"])})
+                                "reply_markup": redraw(db, ans["msg_id"], ans["verdict"], m["message_id"])})
                         except RuntimeError as e:   # the same button tapped twice: already ticked
                             if "not modified" not in str(e):
                                 raise
+        except sqlite3.OperationalError as e:   # database busy (a summary writing): keep this tap
+            db.rollback()                            # unread, so Telegram sends it again next minute
+            print(f"Job feedback: database busy, tap kept for the next run ({e})")
+            break
         except Exception as e:   # one bad update must not block the rest
             print(f"Job feedback: one tap not handled ({e})")
         OFFSET.write_text(str(u["update_id"] + 1))   # read: Telegram won't send it again
@@ -235,10 +370,17 @@ def report(db) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["backlog", "collect", "report"])
+    parser.add_argument("command", choices=["backlog", "collect", "report", "sync-taps"])
     parser.add_argument("--live", action="store_true")
     args = parser.parse_args()
     db = store.open_db()
+    if args.command == "sync-taps":
+        from .pipeline import scratch_copy
+        work = db if args.live else scratch_copy(db)
+        for r in sync_taps(work):
+            print(f"  {r['verdict']:<8} {r['company'][:30]:<30} {r['title'][:50]}")
+        print("(filed)" if args.live else "(dry run on a copy: nothing kept)")
+        return
     if args.command == "collect":
         collect(db)
     elif args.command == "report":

@@ -102,7 +102,8 @@ def sections(rows: list) -> dict:
 def ping_counts(rows: list, jobs: list = ()) -> dict:
     """Just the numbers for the Telegram ping: no subjects or senders leave the Mac."""
     g = sections(rows)
-    return {k: len(g[k]) for k in ("unlabelled", "job", "updates", "reply", "read")} | {"jobs": len(jobs)}
+    return {k: len(g[k]) for k in ("unlabelled", "job", "updates", "reply", "read")} | \
+        {"jobs": len(jobs), "grad_jobs": len(screener.split_by_experience(jobs)[0])}
 
 
 def collapse(rows: list) -> tuple[list, list]:
@@ -203,11 +204,21 @@ def todo_bit(todos) -> str:
     return f"{n} job to-do{'s' if n > 1 else ''}" if n else ""
 
 
+def jobs_bit(jobs: list) -> str:
+    return notify.good_jobs_bit(len(jobs), len(screener.split_by_experience(jobs)[0]))
+
+
+JOB_GROUPS = [  # (heading, colour, note): the two groups of good jobs, in this order (Sid, 22 Nov)
+    ("No experience needed", "#0d9488", "The ad says fresh graduates qualify."),
+    ("May need experience", "#475569", "Junior roles and plain titles: the alert doesn't say whether they take graduates."),
+]
+
+
 def subject_line(g: dict, total: int, jobs: list = (), cal=None, todos=()) -> str:
     stamp = datetime.now().strftime("%a %H:%M")
     if failed_bit(g):   # never "nothing needs you" when Claude didn't look
         bits = [failed_bit(g), cal_bit(cal), todo_bit(todos),
-                f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
+                jobs_bit(jobs),
                 f"{len(g['job'])} job" if g["job"] else "",
                 f"{len(g['updates'])} job update{'s' if len(g['updates']) > 1 else ''}" if g["updates"] else "",
                 f"{len(g['reply'])} to reply" if g["reply"] else "",
@@ -217,7 +228,7 @@ def subject_line(g: dict, total: int, jobs: list = (), cal=None, todos=()) -> st
     lead += ", " if lead else ""
     if jobs or g["job"] or g["updates"] or g["reply"] or g["read"]:
         bits = [cal_bit(cal), todo_bit(todos),
-                f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}" if jobs else "",
+                jobs_bit(jobs),
                 f"{len(g['job'])} job" if g["job"] else "",
                 f"{len(g['updates'])} job update{'s' if len(g['updates']) > 1 else ''}" if g["updates"] else "",
                 f"{len(g['reply'])} to reply" if g["reply"] else "",
@@ -292,9 +303,11 @@ def build_text(rows: list, jobs: list = (), notes: list = (), cal=None, todos=()
         today = (cal or {}).get("day") or datetime.now().date()
         out += [f"JOB TO-DOS ({len(todos)})", "-" * 30]
         out += [f"* {t['company']}: {t['action']} ({pipeline.due_words(t['due'], today)})" for t in todos] + [""]
-    if jobs:
-        out += [f"JOBS WORTH APPLYING TO ({len(jobs)})", "-" * 30]
-        for j in jobs:
+    for (head, _, note), group in zip(JOB_GROUPS, screener.split_by_experience(list(jobs))):
+        if not group:
+            continue
+        out += [f"JOBS: {head.upper()} ({len(group)})", "-" * 30, note, ""]
+        for j in group:
             tag = "  [likely commission-based]" if is_commission(j) else ""
             out += [f"* {job_line(j)}{tag}", f"  {j['reason']}"] + ([f"  {j['url']}"] if j["url"] else []) + [""]
     for key, heading, _ in GROUPS:
@@ -415,7 +428,7 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None, todos=()
                 f'{e(right)}{note}</td></tr></table>')
 
     chips = (chip(f"⚠️ {len(g['unlabelled'])} not labelled", "#dc2626") if g["unlabelled"] else "") + \
-        (chip(f"{len(jobs)} good job{'s' if len(jobs) > 1 else ''}", "#0d9488") if jobs else "") + \
+        (chip(jobs_bit(jobs), "#0d9488") if jobs else "") + \
         "".join(chip(f"{len(g[k])} {h.lower()}", c) for k, h, c in GROUPS if g[k])
     chips = chips or chip("Nothing needs you", "#6b7280")
 
@@ -458,9 +471,12 @@ def build_html(rows: list, jobs: list = (), notes: list = (), cal=None, todos=()
             when_txt = pipeline.due_words(t["due"], today)
             body.append(day_row(pipeline.short_company(t["company"]), t["action"] or "action needed",
                                 when_txt[:1].upper() + when_txt[1:], "#b91c1c" if soon or t["due"] is None else "#b45309"))
-    if jobs:  # then: the point of the whole job hunt
-        body.append(heading("Jobs worth applying to", "#0d9488", len(jobs)))
-        for j in jobs:
+    for (head, colour, note), group in zip(JOB_GROUPS, screener.split_by_experience(list(jobs))):
+        if not group:   # then: the point of the whole job hunt, no-experience jobs first
+            continue
+        body.append(heading(head, colour, len(group)))
+        body.append(f'<div class="eo-sub" style="padding:2px 0 6px 14px;font-size:13px;color:#6b7280">{e(note)}</div>')
+        for j in group:
             title = e(j["title"])
             if j["url"]:  # only links the screener checked point at the sending job board
                 title = (f'<a class="eo-text" href="{e(j["url"])}" style="color:#111827;'
@@ -669,6 +685,21 @@ def remember_buttons(db, message_id, brief) -> None:
         print(f"Couldn't record the Done buttons (taps on them won't redraw): {e}")
 
 
+def send_job_buttons(db, jobs: list) -> None:
+    """Good jobs to Telegram with feedback buttons (feedback.py): no-experience ones one by one,
+    the rest grouped (22 Nov). Each group on its own, so one failing doesn't skip the other.
+    Never raises: the summary is already delivered."""
+    no_exp, maybe = screener.split_by_experience(jobs)
+    for what, send, group in (("no-experience job(s) sent one by one", feedback.send_jobs, no_exp),
+                              ("'may need experience' job(s) sent grouped", feedback.send_group, maybe)):
+        if not group:
+            continue
+        try:
+            print(f"Telegram: {send(db, group)} {what}")
+        except Exception as e:
+            print(f"Job buttons FAILED for {what.split(' sent')[0]} (summary unaffected): {e}")
+
+
 def send_queue(db, cal) -> None:
     """Mornings only (cal exists): the apply queue message (apply_queue.py). Never raises."""
     if not cal:
@@ -693,22 +724,32 @@ def summarise_recorded(via: str, now: datetime | None = None, force: bool = Fals
               f"delivered: nothing to do (--force runs it anyway)")
         return False
     try:
-        summarise(live=True, sample=False, slot=slot)
+        summarise(live=True, sample=False, slot=slot, db=db)
     except Exception as e:
-        slots.record(db, slot, now, via, error=e)
+        # The run and its record share one connection (22 Nov). Before, the failed run's own
+        # connection still held its half-written changes, so recording the failure on a second
+        # one hit "database is locked" and nothing was recorded (21 Nov 18:01). Undo those
+        # changes first; the next run fetches the same mail again.
+        db.rollback()
+        try:
+            slots.record(db, slot, now, via, error=e)
+        except Exception as record_error:
+            print(f"Couldn't record the failed run ({record_error}); catch-up still sees it as missing")
         raise
     slots.record(db, slot, now, via)
     store.backup(db)   # once a day (the first real run of the day); never raises
     return True
 
 
-def summarise(live: bool, sample: bool, slot: datetime | None = None):
+def summarise(live: bool, sample: bool, slot: datetime | None = None, db=None):
     """The summary run. Returns (database, live); database is None for a --sample preview.
-    `slot` is the 08:00/18:00 it belongs to: it decides whether the calendar is included."""
+    `slot` is the 08:00/18:00 it belongs to: it decides whether the calendar is included.
+    db: the caller's connection (summarise_recorded), else a new one."""
     mode =("LIVE" if live else "dry run") + (" sample" if sample else "")
     print(f"=== {datetime.now():%Y-%m-%d %H:%M} digest ({mode}) ===")
 
-    db = store.open_db()
+    if db is None:
+        db = store.open_db()
     step_notes = []   # steps that failed this run, said in the summary instead of only in the log
     if sample:
         db.execute("CREATE TEMP TABLE digested AS SELECT * FROM main.digested WHERE 0")  # pretend nothing was summarised
@@ -783,10 +824,7 @@ def summarise(live: bool, sample: bool, slot: datetime | None = None):
         remember_buttons(db, notify.ping(ping_counts(recent, jobs), len(recent), DELIVER_TO,
                                          with_buttons(db, brief)), brief)   # after delivery
         if jobs and not sample:
-            try:   # each good job with feedback buttons (feedback.py); never stops the summary
-                print(f"Telegram: {feedback.send_jobs(db, jobs)} job(s) sent with buttons")
-            except Exception as e:
-                print(f"Job buttons FAILED (summary unaffected; retried with the next summary's jobs only): {e}")
+            send_job_buttons(db, jobs)
         if not sample:
             send_queue(db, cal)
     else:

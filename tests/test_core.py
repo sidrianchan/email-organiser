@@ -3,7 +3,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from email_organiser import digest, store
+from email_organiser import digest, screener, store
 from email_organiser.fetch import body_text, parse_message
 
 
@@ -410,15 +410,57 @@ def test_no_profile_means_no_screening(db, monkeypatch, tmp_path, capsys):
 
 
 def test_good_jobs_lead_the_summary_and_ping():
-    jobs = [dict(title="Graduate <b>Analyst</b>", company="Acme", location="HK", closing="30 Nov",
+    jobs = [dict(title="Data <b>Analyst</b>", company="Beta", location="HK", closing="", level="unclear",
+                 reason="plain title", url=""),
+            dict(title="Graduate <b>Analyst</b>", company="Acme", location="HK", closing="30 Nov", level="graduate",
                  reason="graduate role", url="https://url.jobsdb.com/x")]
     html_body = digest.build_html([row()], jobs)
-    assert "Jobs worth applying to" in html_body and "<b>Analyst" not in html_body  # escaped
-    assert html_body.index("Jobs worth applying to") < html_body.index("Everything else")
-    assert "JOBS WORTH APPLYING TO (1)" in digest.build_text([row()], jobs)
-    assert "1 good job" in digest.subject_line(digest.sections([row()]), 1, jobs)
+    assert "<b>Analyst" not in html_body  # escaped
+    # no-experience group first (even though it came second), then the rest, then the mail
+    assert html_body.index("No experience needed") < html_body.index("Graduate &lt;b&gt;Analyst") \
+        < html_body.index("May need experience") < html_body.index("Data &lt;b&gt;Analyst") < html_body.index("Everything else")
+    t = digest.build_text([row()], jobs)
+    assert t.index("JOBS: NO EXPERIENCE NEEDED (1)") < t.index("JOBS: MAY NEED EXPERIENCE (1)")
+    assert "2 good jobs (1 no experience needed)" in digest.subject_line(digest.sections([row()]), 1, jobs)
     text, loud = notify.message(digest.ping_counts([row()], jobs), 1, "yahoo")
-    assert "1 good job" in text and loud and "Acme" not in text
+    assert "2 good jobs (1 no experience needed)" in text and loud and "Acme" not in text
+
+
+def test_a_group_with_no_jobs_has_no_heading():
+    only_maybe = [dict(title="Analyst", company="Beta", location="HK", closing="", reason="r", url="")]  # older job: no level
+    h, t = digest.build_html([row()], only_maybe), digest.build_text([row()], only_maybe)
+    assert "No experience needed" not in h and "NO EXPERIENCE NEEDED" not in t and "May need experience" in h
+    subject = digest.subject_line(digest.sections([row()]), 1, only_maybe)
+    assert "1 good job" in subject and "no experience" not in subject
+
+
+def test_good_jobs_wording():
+    assert notify.good_jobs_bit(16, 2) == "16 good jobs (2 no experience needed)"
+    assert notify.good_jobs_bit(2, 2) == "2 good jobs (no experience needed)"
+    assert notify.good_jobs_bit(1, 0) == "1 good job"
+    assert notify.good_jobs_bit(0, 0) == ""
+
+
+def test_no_experience_jobs_are_listed_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "t.db")
+    db = store.open_db()
+    for n, (level, size) in enumerate([("unclear", "large"), ("graduate", "small"), ("junior", "large"),
+                                       (None, "large"), ("graduate", "large"), ("experienced", "small")]):
+        db.execute("INSERT INTO jobs (job_key, title, company, fit, level, employer_size, found_at) "
+                   "VALUES (?, ?, 'C', 'high', ?, ?, ?)", (f"k{n}", f"job{n}", level, size, f"2026-11-2{n} 00:00"))
+    db.commit()
+    order = [r["title"] for r in screener.unshown_high(db)]
+    assert order[:2] == ["job4", "job1"]               # graduate: big employer first, then small
+    assert order[2:] == ["job0", "job2", "job3", "job5"]   # the rest: big first, oldest first
+    assert screener.needs_no_experience({"level": "graduate"}) and not screener.needs_no_experience({"level": "junior"})
+    assert not screener.needs_no_experience({"title": "older job, never judged"})
+
+
+def test_prompt_counts_entry_level_and_chinese_wording_as_graduate():
+    p = screener.SYSTEM_PROMPT
+    for words in ('"entry-level"', "no experience required", "IANG welcome", "0-2 years", "無相關經驗要求"):
+        assert words in p
+    assert '"Junior" or "assistant" alone is not enough' in p
 
 
 def test_screener_failure_never_stops_the_summary(db, monkeypatch, capsys):
@@ -493,3 +535,40 @@ def test_jobs_alone_still_produce_a_summary(db, monkeypatch, capsys, tmp_path):
     digest.main()
     out = capsys.readouterr().out
     assert "1 good job" in out and "No new emails" not in out
+
+
+def test_fetch_saves_each_account_before_reading_the_next(tmp_path, monkeypatch):
+    """22 Nov: one account's connection dropping must not throw away mail already read from another."""
+    import imaplib
+    from email_organiser import fetch
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "t.db")
+    db = store.open_db()
+    monkeypatch.setattr(fetch, "load_accounts", lambda: [{"name": "yahoo"}, {"name": "icloud"}])
+    class Client:
+        def __init__(self, name): self.name = name
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def select_folder(self, *a, **k): return {b"UIDVALIDITY": 1}
+    monkeypatch.setattr(fetch, "connect", lambda account: Client(account["name"]))
+    raw = b"From: a@b.c\r\nSubject: hi\r\nMessage-ID: <1@b.c>\r\nDate: Sat, 21 Nov 2026 10:00:00 +0800\r\n\r\nbody"
+    def recent(client, hours, seen):
+        if client.name == "icloud":
+            raise imaplib.IMAP4.abort("socket error: EOF")
+        return {5: raw}
+    monkeypatch.setattr(fetch, "fetch_recent", recent)
+    with pytest.raises(imaplib.IMAP4.abort):
+        fetch.fetch_new(db, 26, show=False)
+    db.rollback()   # what a crashed run's connection amounts to
+    assert db.execute("SELECT COUNT(*) FROM messages WHERE account = 'yahoo'").fetchone()[0] == 1
+
+
+def test_one_job_group_failing_to_send_never_skips_the_other(monkeypatch, capsys):
+    sent = []
+    def down(db, jobs):
+        raise RuntimeError("Telegram down")
+    monkeypatch.setattr(digest.feedback, "send_jobs", down)
+    monkeypatch.setattr(digest.feedback, "send_group", lambda db, jobs: sent.append(jobs) or len(jobs))
+    jobs = [dict(title="Graduate", level="graduate"), dict(title="Analyst", level="unclear")]
+    digest.send_job_buttons(None, jobs)                    # never raises
+    out = capsys.readouterr().out
+    assert sent == [[jobs[1]]] and "FAILED for no-experience job(s)" in out and "1 'may need experience'" in out

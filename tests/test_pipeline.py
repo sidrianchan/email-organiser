@@ -299,7 +299,12 @@ def test_job_to_dos_in_both_summaries_with_done_buttons(db, monkeypatch):
     assert brief["loud"] and brief["todo_ids"] == [a]
     marked = digest.with_buttons(db, brief)["markup"]
     assert marked == {"inline_keyboard": [[{"text": "✓ Gamma Co done", "callback_data": f"d:{a}"}]]}
-    # both emails: their own section
+    # both emails: their own section (no calendar here, so they read the clock: pin it to 21 Nov)
+    class Fixed(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 21, 8, 0, tzinfo=tz)
+    monkeypatch.setattr(digest, "datetime", Fixed)
     t = digest.build_text([], todos=todos)
     assert "JOB TO-DOS (1)\n" in t and "* Gamma Co: complete online assessment (due Mon 23 Nov)" in t
     assert "Job to-dos" in digest.build_html([], todos=todos)

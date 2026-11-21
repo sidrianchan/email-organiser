@@ -112,9 +112,11 @@ def fetch_new(db, hours: int, show: bool = True) -> int:
                 new += 1
                 if show:
                     print(f"  [{account['name']}] {info['sender'][:35]:<35} | {info['subject'][:60]}")
+        db.commit()  # each account as soon as it's read (22 Nov): holding one write open across all
+                     # three downloads kept the database locked for minutes, and a failure in the
+                     # next account threw this one's mail away
         print(f"{account['name']}: {new} new in the last {hours}h")
         total_new += new
-    db.commit()  # save everything to disk in one go
     return total_new
 
 
