@@ -4,7 +4,11 @@ Why (review, 20 Nov): 7 of the 11 real instant job pings were status updates ("v
 "posting closed"); the only real reply draft answered a no-reply address (that email wanted an
 assessment done, not a reply); and 51 jobs tapped "Would apply" had nothing following them up.
 
-What happens to each job email (label 'job', from classify.py):
+Which emails: label 'job' (classify.py), plus application receipts (23 Nov): 'fyi' emails from an
+application system or a recruiting sender (RECEIPT_FROM). A receipt read as 'other' (password
+reset, account set-up) is filed nowhere.
+
+What happens to each job email:
   1. Claude reads it once more (Sonnet, one call per batch of 10): which employer and role, what
      stage it reports, whether YOU must do something, and a deadline only if the email states one.
   2. The code files it under an application: same employer and role, by the screener's own
@@ -52,6 +56,20 @@ NOT_EMPLOYERS = {"workday", "jobsdb", "linkedin", "hirevue", "indeed", "greenhou
 # Requisition codes that application systems put in titles ("R210016 Information & Digital
 # Technology", "Graduate (Job ID: 66306)"): dropped before matching, or one job looks like two.
 REQ_CODE = re.compile(r"\(?\bjob\s*id:?\s*\d+\)?|\b(?:r|req|jr)[-_ ]?\d{4,}\b", re.I)
+# Application receipts (23 Nov, Sid chose option a). Your label rule makes the first "we received
+# your application" email 'fyi', not 'job', so the pipeline never saw it: 43 receipts, none filed,
+# and jobs you'd applied to stayed in the apply queue. Now 'fyi' emails from an application system
+# are read too. Matched on the whole From line: the systems themselves, plus employers' own
+# recruiting senders (several big employers send from their own domains). Measured 23
+# Nov on the real mail: 55 of 93 'fyi' emails; a marathon "application acknowledgement", an Apple
+# receipt and a Jobsdb "still accepting applications" reminder are not picked.
+RECEIPT_FROM = re.compile(r"myworkday|workday\.com|greenhouse|smartrecruiters|workable|ashbyhq|lever\.co|"
+                          r"icims|successfactors|taleo|amazon\.jobs|jobsdb applications|"
+                          r"recruit|career|talent|hiring|resourcing", re.I)
+
+
+def from_application_system(sender: str) -> bool:
+    return bool(RECEIPT_FROM.search(sender or ""))
 
 
 def clean_title(title: str) -> str:
@@ -131,20 +149,39 @@ def advance(current: str, reported: str) -> str:
     return reported if RANK[reported] > RANK.get(current, -1) else current
 
 
-def find(db, company: str, role: str):
+ENUMERATION = re.compile(r"\(\d{1,2}\)")
+
+
+def title_core(company: str, title: str) -> str:
+    """The title as matching sees it (23 Nov, found in the receipts dry run): numbering like
+    '(1) AI Engineer (2) AI Analyst' and a leading copy of the company's own name ('Acme
+    Management Trainee' at Acme Bank) are dropped, or one job looked like two."""
+    words = norm(ENUMERATION.sub(" ", clean_title(title))).split()
+    name = norm(company).split()
+    i = 0
+    while i < len(name) and i < len(words) - 1 and words[i] == name[i]:
+        i += 1
+    return " ".join(words[i:])
+
+
+def find(db, company: str, role: str, ended: bool = False):
     """The open application this news is about, or None. Same company (first word) and the same
     title. An email that names no role, or a role nobody recorded, goes to the company's open
-    application with no title, else (no role named) its most recently updated one."""
+    application with no title, else (no role named) its most recently updated one.
+    ended=True: a REJECTED application with the same title (no guessing without a title)."""
     ck = company_key(company)
     if not ck:
         return None
-    rows = [a for a in db.execute("SELECT * FROM applications WHERE stage NOT IN ('rejected', 'withdrawn') "
+    where = "stage = 'rejected'" if ended else "stage NOT IN ('rejected', 'withdrawn')"
+    rows = [a for a in db.execute(f"SELECT * FROM applications WHERE {where} "
                                   "ORDER BY updated_at DESC, id DESC") if company_key(a["company"]) == ck]
     if role:
-        same = [a for a in rows if same_title(clean_title(a["title"]), clean_title(role))]
+        same = [a for a in rows if same_title(title_core(a["company"], a["title"]), title_core(company, role))]
+        if ended:
+            return (same or [None])[0]
         untitled = [a for a in rows if not a["title"]]
         return (same or untitled or [None])[0]
-    return rows[0] if rows else None
+    return None if ended else rows[0] if rows else None
 
 
 def log(db, app_id: int, k: tuple | None, old: str | None, new: str, closed: bool,
@@ -169,6 +206,11 @@ def upsert(db, company: str, title: str, reported: str, closed: bool = False, k:
         behind you. Tapping Done (mark_done) also clears it."""
     title = clean_title(title)
     app = find(db, company, title)
+    if app is None and reported == "applied":
+        # "We received your application" is the earliest news there is: if that job was already
+        # rejected, this is old news about it, not a new application (23 Nov: reading the
+        # receipts backlog would have reopened two rejected applications).
+        app = find(db, company, title, ended=True)
     if app is None:
         stage = "would_apply" if reported == "would_apply" else advance("applied", reported)
         app_id = db.execute(
@@ -232,15 +274,18 @@ def check_deadline(a: dict, email_text: str, sent: date) -> date | None:
 # --- reading job emails -----------------------------------------------------------------
 
 def pending(db, since_hours: float | None = None) -> list:
-    """Job emails not read yet, oldest first (so stages are filed in the order they happened).
-    Planted test emails (example.com senders, reserved for tests by RFC 2606) are left out."""
+    """Job emails not read yet, plus 'fyi' emails from an application system (receipts), oldest
+    first (so stages are filed in the order they happened). Planted test emails (example.com
+    senders, reserved for tests by RFC 2606) are left out."""
     rows = db.execute("""
-        SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.snippet, m.date, m.first_seen
+        SELECT m.account, m.uidvalidity, m.uid, m.sender, m.subject, m.snippet, m.date, m.first_seen,
+               c.label
         FROM messages m JOIN claude_labels c USING (account, uidvalidity, uid)
         LEFT JOIN job_reads r USING (account, uidvalidity, uid)
-        WHERE c.label = 'job' AND r.uid IS NULL
+        WHERE c.label IN ('job', 'fyi') AND r.uid IS NULL
           AND (? IS NULL OR m.first_seen >= datetime('now', '-' || ? || ' hours'))
     """, (since_hours, since_hours)).fetchall()
+    rows = [r for r in rows if r["label"] == "job" or from_application_system(r["sender"])]
     return sorted((r for r in rows if not is_example(store.sender_address(r["sender"]))), key=arrived)
 
 
@@ -260,15 +305,20 @@ def read_emails(rows: list) -> dict[tuple, dict]:
 
 
 def file_email(db, r, a: dict) -> dict:
-    """Store one reading and file it under its application. Returns the stored reading."""
+    """Store one reading and file it under its application. Returns the stored reading.
+    A receipt ('fyi' from an application system) is filed like a job email, except when the
+    reading says 'other' (a password reset, an account set-up): then it's kept as read but filed
+    nowhere, so it can't invent an application."""
     sent = arrived(r).astimezone().date()
     deadline = check_deadline(a, f"{r['subject']}\n{r['snippet']}", sent) if a["action_needed"] else None
     company, role = employer(a["company"]), (a["role"] or "").strip()
     action = (a["action"] or "").strip()[:80] if a["action_needed"] else ""
     if a["action_needed"] and not action:
         action = "action needed"
+    receipt = "label" in r.keys() and r["label"] == "fyi"
+    files = company and not (receipt and a["stage"] == "other")
     app_id = upsert(db, company, role, a["stage"], bool(a["posting_closed"]), key(r), deadline, action,
-                    source="email", action_at=sent.isoformat()) if company else None
+                    source="receipt" if receipt else "email", action_at=sent.isoformat()) if files else None
     reading = dict(account=r["account"], uidvalidity=r["uidvalidity"], uid=r["uid"], company=company,
                    role=role, stage=a["stage"], posting_closed=int(bool(a["posting_closed"])),
                    action_needed=int(bool(a["action_needed"])), action=action,
@@ -499,7 +549,18 @@ def main() -> None:
     if args.gate:
         gate(db)
         return
-    work = db if args.live else scratch_copy(db)
+    if args.live:   # a live run by hand waits for the scheduled runs, or both could file one email
+        from .runlock import run_lock
+        with run_lock(wait_seconds=900) as got:
+            if not got:
+                print("Another run held the lock for 15 minutes: nothing done. Try again.")
+                return
+            run(db, args)
+        return
+    run(scratch_copy(db), args)
+
+
+def run(work, args) -> None:
     if args.seed:
         print(f"Seeded from {seed(work)} records")
     for rd in step(work, live=True, since_hours=None if args.all else 48).values():

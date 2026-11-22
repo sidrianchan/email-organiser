@@ -407,3 +407,101 @@ def test_requisition_codes_dont_split_one_job_in_two(db):
     c = pipeline.upsert(db, "Acme", "Graduate - Fund Solutions (Job ID: 66306)", "assessment", source="t")
     assert a == b != c
     assert pipeline.clean_title("Graduate - Fund Solutions (Job ID: 66306)") == "Graduate - Fund Solutions"
+
+
+# --- application receipts (23 Nov): 'fyi' emails from an application system ---------------------
+
+def test_receipts_are_read_only_from_application_systems(db, monkeypatch):
+    add_job_email(db, 1, "Thank you for your application", sender="acme@myworkday.com", label="fyi")
+    add_job_email(db, 2, "Application received", sender="Beta Recruitment <noreply@recruitment.beta.test>", label="fyi")
+    add_job_email(db, 3, "Marathon 2027 – Application Acknowledgement", sender="City Marathon <no-reply@marathon.test>",
+                  label="fyi")
+    add_job_email(db, 4, "Your receipt", sender="Shop <no_reply@shop.test>", label="fyi")
+    add_job_email(db, 5, "Weekly digest", sender="Careers Weekly <news@acme.test>", label="newsletter")
+    assert [r["uid"] for r in pipeline.pending(db)] == [1, 2]            # only fyi from a recruiting sender
+    assert pipeline.from_application_system("Jobsdb Applications <noreply@e.jobsdb.com>")
+    assert not pipeline.from_application_system("Jobsdb Reminders <noreply@e.jobsdb.com>")
+
+
+def test_a_receipt_files_an_application_as_applied(db, monkeypatch):
+    queued = pipeline.upsert(db, "Acme Bank", "Graduate Analyst", "would_apply", source="telegram")
+    add_job_email(db, 1, "Thank you for your application", sender="acme@myworkday.com", label="fyi")
+    add_job_email(db, 2, "We received your Beta application", sender="no-reply@us.greenhouse-mail.io", label="fyi")
+    monkeypatch.setattr(pipeline, "run_claude", fake_reader({
+        "Thank you for your application": reading(company="Acme Bank", role="Graduate Analyst", stage="applied"),
+        "We received your Beta application": reading(company="Beta Ltd", role="Software Engineer", stage="applied"),
+    }))
+    pipeline.step(db, live=True)
+    apps = {a["company"]: a for a in db.execute("SELECT * FROM applications")}
+    assert apps["Acme Bank"]["id"] == queued and apps["Acme Bank"]["stage"] == "applied"   # leaves the apply queue
+    assert apps["Beta Ltd"]["stage"] == "applied" and apps["Beta Ltd"]["source"] == "receipt"
+    assert pipeline.waiting(db, date.today()) == (0, 0)
+
+
+def test_a_receipt_never_undoes_a_later_stage(db, monkeypatch):
+    a = pipeline.upsert(db, "Acme Bank", "Graduate Analyst", "interview", source="email")
+    add_job_email(db, 1, "Thank you for your application", sender="acme@myworkday.com", label="fyi")
+    monkeypatch.setattr(pipeline, "run_claude", fake_reader({
+        "Thank you for your application": reading(company="Acme Bank", role="Graduate Analyst", stage="applied")}))
+    pipeline.step(db, live=True)
+    assert db.execute("SELECT stage FROM applications WHERE id = ?", (a,)).fetchone()[0] == "interview"
+
+
+def test_an_account_email_from_a_system_invents_nothing(db, monkeypatch):
+    add_job_email(db, 1, "Reset your password for your candidate account", sender="acme@otp.workday.com", label="fyi")
+    monkeypatch.setattr(pipeline, "run_claude", fake_reader({
+        "Reset your password for your candidate account": reading(company="Acme Bank", role="", stage="other")}))
+    got = pipeline.step(db, live=True)
+    assert len(got) == 1 and got[next(iter(got))]["application_id"] is None
+    assert db.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 0
+    monkeypatch.setattr(pipeline, "run_claude", lambda *a, **k: pytest.fail("read once only"))
+    assert pipeline.step(db, live=True) == {}
+
+
+def test_a_receipt_never_pings(db, monkeypatch, pings):
+    add_job_email(db, 1, "Thank you for your application", sender="acme@myworkday.com", label="fyi")
+    monkeypatch.setattr(pipeline, "run_claude", lambda *a, **k: pytest.fail("no job alert, nothing to read now"))
+    assert watch.check(db, live=True, now=NOON) == 0 and pings == []
+
+
+def test_an_old_receipt_does_not_reopen_a_rejected_application(db):
+    a = pipeline.upsert(db, "Acme Education Limited", "AI Developer", "rejected", source="email")
+    assert pipeline.upsert(db, "Acme Education Limited", "AI Developer", "applied", source="receipt") == a
+    assert db.execute("SELECT stage FROM applications WHERE id = ?", (a,)).fetchone()[0] == "rejected"
+    assert db.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 1
+    b = pipeline.upsert(db, "Acme Education Limited", "Data Analyst", "applied", source="receipt")
+    assert b != a                                                      # another job there is new
+    c = pipeline.upsert(db, "Acme Education Limited", "AI Developer", "interview", source="email")
+    assert c != a          # only 'received' is old news; later news about a rejected job stays separate
+
+
+def test_numbering_and_the_company_name_dont_split_a_job(db):
+    a = pipeline.upsert(db, "Lead Solutions Limited", "(1) AI Deployed Engineer (2) AI Engineer (3) AI Analyst",
+                        "applied", source="applied.tsv")
+    assert pipeline.upsert(db, "Lead Solutions Limited", "AI Deployed Engineer; AI Engineer; AI Analyst",
+                           "applied", source="receipt") == a
+    b = pipeline.upsert(db, "Seng Kee Bank Ltd", "Seng Kee Management Trainee (MT) Programme - Commercial Banking",
+                        "would_apply", source="applied.tsv")
+    assert pipeline.upsert(db, "Seng Kee Bank", "Management Trainee (MT) Programme - Commercial Banking",
+                           "applied", source="receipt") == b
+    assert pipeline.title_core("Seng Kee Bank", "Seng Kee") == "kee"   # never strips a title to nothing
+
+
+def test_a_receipt_after_withdrawing_is_a_real_application(db):
+    a = pipeline.upsert(db, "Acme Bank", "Graduate Analyst", "would_apply", source="telegram")
+    db.execute("UPDATE applications SET stage = 'withdrawn' WHERE id = ?", (a,))   # tapped 'not interested'
+    b = pipeline.upsert(db, "Acme Bank", "Graduate Analyst", "applied", source="receipt")   # ...then applied anyway
+    assert b != a and db.execute("SELECT stage FROM applications WHERE id = ?", (b,)).fetchone()[0] == "applied"
+
+
+def test_a_live_run_by_hand_waits_for_the_lock(db, monkeypatch, capsys):
+    from contextlib import contextmanager
+    @contextmanager
+    def taken(wait_seconds=0):
+        yield False
+    monkeypatch.setattr(runlock, "run_lock", taken)
+    monkeypatch.setattr(store, "open_db", lambda: db)
+    monkeypatch.setattr("sys.argv", ["pipeline", "--all", "--live"])
+    monkeypatch.setattr(pipeline, "step", lambda *a, **k: pytest.fail("ran without the lock"))
+    pipeline.main()
+    assert "nothing done" in capsys.readouterr().out
